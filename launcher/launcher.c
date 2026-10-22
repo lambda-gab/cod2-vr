@@ -1,0 +1,924 @@
+// Call of Duty 2 VR launcher: starts CoD2SP_s.exe and lets the player change the common settings.
+//
+// It lives in the game folder. The player's choices go to %APPDATA%\CoD2-VR\settings.ini, which
+// the mod reads on top of cod2_vr.ini (the game folder is usually under Program Files, where
+// writing needs administrator rights). Graphics settings of the game itself are passed on the
+// command line when it is started (+set ...), so they hold whatever the game saved before.
+//
+// Plain Win32 + GDI, drawn by hand: a banner, a bar of buttons and pages of options.
+#define WIN32_LEAN_AND_MEAN
+#define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <windowsx.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
+#include <winhttp.h>
+#include <olectl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+#include "launcher_res.h"
+
+#define VERSION_TEXT L"v0.1.0"
+#define URL_GITHUB   "https://github.com/lambda-gab/cod2-vr"
+#define URL_DISCORD  "https://discord.gg/SRsK2x5Tn"
+#define URL_RELEASES "https://github.com/lambda-gab/cod2-vr/releases/latest"
+
+// ---------------------------------------------------------------------------
+// Layout, in pixels at 96 dpi (scaled by P())
+// ---------------------------------------------------------------------------
+#define BASE_W   1000
+#define BASE_H   560
+#define BANNER_H 364
+#define BAR_Y    480
+
+static float g_scale = 1.0f;
+#define P(v) ((int)((v) * g_scale + 0.5f))
+
+#define COL_GOLD      RGB(214, 170, 62)
+#define COL_GOLD_DARK RGB(150, 112, 30)
+#define COL_STEEL     RGB(170, 205, 220)
+#define COL_TEXT      RGB(225, 225, 225)
+#define COL_DIM       RGB(140, 140, 140)
+#define COL_BAR       RGB(14, 14, 14)
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+// One option: choices are "key=value|key=value" lines written to [section] of settings.ini.
+typedef struct {
+    const wchar_t *label, *hint;
+    const char *section;
+    int count;
+    const wchar_t *names[10];
+    const char *values[10];
+    int def;
+    int cur;      // -1 = what is set matches no choice ("Custom")
+    int showRes;  // RenderScale choices: show the eye resolution each one gives
+    int reticle;  // crosshair styles: a small picture of each one beside its name
+    const wchar_t *const *choiceHints;   // a hint for each choice (instead of hint), or NULL
+} option_t;
+
+// VR page, two columns (VR_COL2 first on the right)
+static option_t g_vrOpts[] = {
+    { L"Turning", L"Right stick: turn in steps (gentler) or smoothly.",
+      "Controllers", 4, { L"Snap 30\x00b0", L"Snap 45\x00b0", L"Snap 90\x00b0", L"Smooth" },
+      { "SnapTurn=30", "SnapTurn=45", "SnapTurn=90", "SnapTurn=0" }, 1 },
+    { L"Smooth turn speed", L"Only used with smooth turning.",
+      "Controllers", 3, { L"Slow", L"Normal", L"Fast" },
+      { "SmoothTurnSpeed=90", "SmoothTurnSpeed=150", "SmoothTurnSpeed=220" }, 1 },
+    { L"Dominant hand", L"Which stick turns and which hand points in the menus.",
+      "Controllers", 2, { L"Right", L"Left" }, { "RightHanded=1", "RightHanded=0" }, 0 },
+    { L"Aim", L"The game aims where you look (head yaw and pitch).",
+      "VR", 2, { L"With the head", L"Off" }, { "HeadAim=1", "HeadAim=0" }, 0 },
+    // right column
+    { L"Head tracking", L"Rotation and position: lean and peek for real. Rotation only: the camera stays in the soldier's head.",
+      "VR", 2, { L"Rotation and position", L"Rotation only" }, { "PositionalTracking=1", "PositionalTracking=0" }, 0 },
+    { L"Menus", L"Menus and loading screens: fixed in front of you, or following your head.",
+      "HUD", 2, { L"Fixed", L"Follow head" }, { "MenuFollowsHead=0", "MenuFollowsHead=1" }, 0 },
+    { L"HUD size", L"Width of the screen with the HUD (compass, ammo, subtitles) while playing.",
+      "HUD", 3, { L"Small", L"Normal", L"Large" }, { "Width=0.8", "Width=1.0", "Width=1.3" }, 1 },
+    { L"HUD distance", L"How far in front of you the HUD screen is.",
+      "HUD", 3, { L"Near", L"Normal", L"Far" }, { "Distance=1.0", "Distance=1.4", "Distance=2.0" }, 1 },
+};
+#define VR_COL2 4
+
+static option_t g_gfxOpts[] = {
+    { L"Headset resolution", L"Sharpness in the headset, per eye. Lower it if the game stutters; above Ultra needs a strong GPU.",
+      "VR", 9, { L"Potato (50%)", L"Low (70%)", L"Medium (85%)", L"Native (100%)", L"High (120%)", L"Ultra (140%)",
+                 L"Eagle Eye (160%)", L"Sniper Vision (180%)", L"GPU Furnace (200%)" },
+      { "RenderScale=0.5", "RenderScale=0.7", "RenderScale=0.85", "RenderScale=1", "RenderScale=1.2", "RenderScale=1.4",
+        "RenderScale=1.6", "RenderScale=1.8", "RenderScale=2" }, 3, 0, 1 },
+    { L"Texture quality", L"Detail of the game's textures. Maximum suits any recent PC.",
+      "Launcher", 3, { L"Maximum", L"High", L"Medium" }, { "Picmip=0", "Picmip=1", "Picmip=2" }, 0 },
+    { L"Glow", L"The game's glow around bright light (r_glow). Test option: leave it off if the image looks wrong.",
+      "Launcher", 2, { L"Off", L"On" }, { "Glow=0", "Glow=1" }, 0 },
+};
+
+#define NUM_VR  (int)(sizeof(g_vrOpts) / sizeof(g_vrOpts[0]))
+#define NUM_GFX (int)(sizeof(g_gfxOpts) / sizeof(g_gfxOpts[0]))
+
+static char g_dir[MAX_PATH], g_gameIni[MAX_PATH], g_userIni[MAX_PATH];
+static int  g_haveGame, g_haveMod;
+
+// The value of a key as the mod will see it: settings.ini, else cod2_vr.ini, else "".
+static void ReadSetting(const char *sec, const char *key, char *out, int size)
+{
+    char v[128];
+    GetPrivateProfileStringA(sec, key, "", v, sizeof(v), g_gameIni);
+    GetPrivateProfileStringA(sec, key, v, out, size, g_userIni);
+}
+
+static int SameValue(const char *a, const char *b)
+{
+    char *ea, *eb;
+    double x = strtod(a, &ea), y = strtod(b, &eb);
+    if (*a && *b && !*ea && !*eb) return x - y < 1e-4 && y - x < 1e-4;
+    return !_stricmp(a, b);
+}
+
+// Does every key=value of a choice hold?
+static int ChoiceMatches(const char *sec, const char *pairs, int isDefault)
+{
+    char buf[256], *tok, *ctx = NULL;
+    strncpy(buf, pairs, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    for (tok = strtok_s(buf, "|", &ctx); tok; tok = strtok_s(NULL, "|", &ctx)) {
+        char *eq = strchr(tok, '='), cur[128];
+        if (!eq) continue;
+        *eq = 0;
+        ReadSetting(sec, tok, cur, sizeof(cur));
+        if (!cur[0]) { if (!isDefault) return 0; continue; }   // unset: the default choice holds
+        if (!SameValue(cur, eq + 1)) return 0;
+    }
+    return 1;
+}
+
+static void LoadOption(option_t *o)
+{
+    int i;
+    o->cur = -1;
+    for (i = 0; i < o->count; i++)
+        if (ChoiceMatches(o->section, o->values[i], i == o->def)) { o->cur = i; break; }
+}
+
+static void SaveOption(option_t *o)
+{
+    char buf[256], *tok, *ctx = NULL, dir[MAX_PATH], *slash;
+    if (o->cur < 0) return;
+    strcpy(dir, g_userIni);
+    slash = strrchr(dir, '\\');
+    if (slash) { *slash = 0; CreateDirectoryA(dir, NULL); }
+    strncpy(buf, o->values[o->cur], sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    for (tok = strtok_s(buf, "|", &ctx); tok; tok = strtok_s(NULL, "|", &ctx)) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = 0;
+        WritePrivateProfileStringA(o->section, tok, eq + 1, g_userIni);
+    }
+}
+
+static void LoadAll(void)
+{
+    int i;
+    for (i = 0; i < NUM_VR; i++) LoadOption(&g_vrOpts[i]);
+    for (i = 0; i < NUM_GFX; i++) LoadOption(&g_gfxOpts[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Starting the game
+// ---------------------------------------------------------------------------
+// The game started from here, while it runs (the launcher stays open to try settings).
+static HANDLE g_game;
+
+// A CoD2SP_s.exe from this folder is running (also when Steam started it). Looked up at most once a second.
+static int GameProcessRunning(void)
+{
+    static DWORD last;
+    static int running;
+    PROCESSENTRY32W pe;
+    HANDLE snap;
+    BOOL ok;
+    if (last && GetTickCount() - last < 1000) return running;
+    last = GetTickCount();
+    running = 0;
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    pe.dwSize = sizeof(pe);
+    for (ok = Process32FirstW(snap, &pe); ok && !running; ok = Process32NextW(snap, &pe)) {
+        HANDLE h;
+        wchar_t path[MAX_PATH], dir[MAX_PATH];
+        DWORD len = MAX_PATH;
+        if (_wcsicmp(pe.szExeFile, L"CoD2SP_s.exe")) continue;
+        h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!h) { running = 1; break; }   // cannot tell where it is from: take it as ours
+        if (QueryFullProcessImageNameW(h, 0, path, &len)) {
+            wchar_t *slash = wcsrchr(path, L'\\');
+            if (slash) *slash = 0;
+            MultiByteToWideChar(CP_ACP, 0, g_dir, -1, dir, MAX_PATH);
+            running = !_wcsicmp(path, dir);
+        }
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    return running;
+}
+
+static int GameRunning(void)
+{
+    if (g_game && WaitForSingleObject(g_game, 0) == WAIT_TIMEOUT) return 1;
+    if (g_game) { CloseHandle(g_game); g_game = NULL; }
+    return GameProcessRunning();
+}
+
+// The Steam version's CoD2SP_s.exe only runs when Steam starts it (it reopens itself through Steam,
+// or asks for Steam when it is not there): it is started with a steam:// link, which keeps the
+// command line. Any other copy (CD, other stores) is started directly.
+#define STEAM_APP_ID "2630"
+static int SteamCopy(void)
+{
+    char p[MAX_PATH], lower[MAX_PATH];
+    int i;
+    for (i = 0; g_dir[i] && i < MAX_PATH - 1; i++) lower[i] = (char)tolower((unsigned char)g_dir[i]);
+    lower[i] = 0;
+    if (strstr(lower, "\\steamapps\\")) return 1;
+    _snprintf(p, sizeof(p), "%s\\steam_api.dll", g_dir);
+    if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) return 1;
+    _snprintf(p, sizeof(p), "%s\\steam_appid.txt", g_dir);
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+}
+
+static int SteamInstalled(void)
+{
+    HKEY k;
+    if (RegOpenKeyExA(HKEY_CLASSES_ROOT, "steam\\Shell\\Open\\Command", 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
+    RegCloseKey(k);
+    return 1;
+}
+
+// steam://run/<app>//<arguments>/, spaces as %20
+static int StartThroughSteam(HWND wnd, const char *args)
+{
+    char url[1024];
+    int n = _snprintf(url, sizeof(url), "steam://run/" STEAM_APP_ID "//");
+    for (; *args && n < (int)sizeof(url) - 5; args++) {
+        if (*args == ' ') { memcpy(url + n, "%20", 3); n += 3; }
+        else url[n++] = *args;
+    }
+    url[n++] = '/';
+    url[n] = 0;
+    return (INT_PTR)ShellExecuteA(wnd, "open", url, NULL, NULL, SW_SHOWNORMAL) > 32;
+}
+
+static int StartGame(HWND wnd)
+{
+    char exe[MAX_PATH], cmd[512], args[400], picmip[16], glow[16];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    if (GameRunning()) {
+        MessageBoxW(wnd, L"The game is already running. Settings changed here apply the next time it starts.",
+                    L"Call of Duty 2 VR", MB_ICONINFORMATION);
+        return 0;
+    }
+    _snprintf(exe, sizeof(exe), "%s\\CoD2SP_s.exe", g_dir);
+    GetPrivateProfileStringA("Launcher", "Picmip", "0", picmip, sizeof(picmip), g_userIni);
+    GetPrivateProfileStringA("Launcher", "Glow", "0", glow, sizeof(glow), g_userIni);
+    // r_smp_backend 0: the renderer's backend runs on the game's thread, where the mod paces the
+    // headset frames. r_aasamples 1: the eye images are not multisampled. Windowed: the monitor
+    // shows the left eye and the headset's frame rate is not tied to the monitor's.
+    _snprintf(args, sizeof(args), "+set r_smp_backend 0 +set r_aasamples 1 +set r_fullscreen 0"
+              " +set r_picmip %d +set r_glow %d", atoi(picmip), atoi(glow) ? 1 : 0);
+    if (SteamCopy() && SteamInstalled()) {
+        if (StartThroughSteam(wnd, args)) return 1;
+        MessageBoxW(wnd, L"Could not start the game through Steam. Is Steam installed and logged in?",
+                    L"Call of Duty 2 VR", MB_ICONERROR);
+        return 0;
+    }
+    _snprintf(cmd, sizeof(cmd), "\"%s\" %s", exe, args);
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessA(exe, cmd, NULL, NULL, FALSE, 0, NULL, g_dir, &si, &pi)) {
+        MessageBoxW(wnd, L"Could not start CoD2SP_s.exe.", L"Call of Duty 2 VR", MB_ICONERROR);
+        return 0;
+    }
+    CloseHandle(pi.hThread);
+    g_game = pi.hProcess;
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+enum { PAGE_HOME, PAGE_CONTROLS, PAGE_GRAPHICS, PAGE_VR, PAGE_ABOUT };
+enum { HIT_NONE, HIT_PLAY, HIT_NAV, HIT_PREV, HIT_NEXT, HIT_ROW, HIT_LINK };
+
+typedef struct { RECT r; int type, arg; } hit_t;
+static hit_t   g_hits[256];   // a page of options has up to 3 areas each (row, left arrow, right arrow)
+static int     g_numHits, g_hover = -1, g_page = PAGE_HOME;
+static HBITMAP g_banner;
+static int     g_bannerW, g_bannerH;
+static HFONT   g_fTitle, g_fNav, g_fPlay, g_fText, g_fSmall, g_fBold;
+
+static void AddHit(int x0, int y0, int x1, int y1, int type, int arg)
+{
+    hit_t *h;
+    if (g_numHits >= (int)(sizeof(g_hits) / sizeof(g_hits[0]))) return;
+    h = &g_hits[g_numHits++];
+    SetRect(&h->r, x0, y0, x1, y1);
+    h->type = type;
+    h->arg = arg;
+}
+
+static int Hovered(int type, int arg)
+{
+    return g_hover >= 0 && g_hover < g_numHits && g_hits[g_hover].type == type && g_hits[g_hover].arg == arg;
+}
+
+static void Fill(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
+{
+    RECT r;
+    HBRUSH b = CreateSolidBrush(c);
+    SetRect(&r, x0, y0, x1, y1);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+}
+
+static void Text(HDC dc, HFONT f, COLORREF c, int x0, int y0, int x1, int y1, const wchar_t *s, UINT flags)
+{
+    RECT r;
+    SetRect(&r, x0, y0, x1, y1);
+    SelectObject(dc, f);
+    SetTextColor(dc, c);
+    DrawTextW(dc, s, -1, &r, flags | DT_NOPREFIX);
+}
+
+// A dark veil over the banner for the option pages.
+static void Veil(HDC dc, int x0, int y0, int x1, int y1, BYTE alpha)
+{
+    HDC src = CreateCompatibleDC(dc);
+    HBITMAP one = CreateCompatibleBitmap(dc, 1, 1);
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, alpha, 0 };
+    HGDIOBJ old = SelectObject(src, one);
+    SetPixel(src, 0, 0, RGB(6, 8, 10));
+    AlphaBlend(dc, x0, y0, x1 - x0, y1 - y0, src, 0, 0, 1, 1, bf);
+    SelectObject(src, old);
+    DeleteObject(one);
+    DeleteDC(src);
+}
+
+static void DrawBanner(HDC dc)
+{
+    Fill(dc, 0, 0, P(BASE_W), P(BAR_Y), RGB(0, 0, 0));
+    if (g_banner) {
+        HDC src = CreateCompatibleDC(dc);
+        HGDIOBJ old = SelectObject(src, g_banner);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, NULL);
+        StretchBlt(dc, 0, 0, P(BASE_W), P(BANNER_H), src, 0, 0, g_bannerW, g_bannerH, SRCCOPY);
+        SelectObject(src, old);
+        DeleteDC(src);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Update check: once at start, in the background, the latest release on GitHub. A newer one
+// is shown on the home page (a link to its download page); nothing is downloaded.
+// ---------------------------------------------------------------------------
+#define WM_UPDATE_FOUND (WM_APP + 1)
+static wchar_t g_newVersion[32];
+
+// "v1.10.2" -> 1 10 2; a > b
+static int NewerVersion(const char *a, const wchar_t *b)
+{
+    int x[3] = { 0 }, y[3] = { 0 }, i;
+    if (*a == 'v' || *a == 'V') a++;
+    if (*b == L'v' || *b == L'V') b++;
+    sscanf(a, "%d.%d.%d", &x[0], &x[1], &x[2]);
+    swscanf(b, L"%d.%d.%d", &y[0], &y[1], &y[2]);
+    for (i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] > y[i];
+    return 0;
+}
+
+static DWORD WINAPI UpdateCheckThread(LPVOID param)
+{
+    HWND wnd = (HWND)param;
+    HINTERNET s = NULL, c = NULL, r = NULL;
+    char body[65536], *tag;
+    DWORD got, total = 0;
+    s = WinHttpOpen(L"CoD2-VR-Launcher", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (s) WinHttpSetTimeouts(s, 5000, 5000, 5000, 5000);
+    if (s) c = WinHttpConnect(s, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (c) r = WinHttpOpenRequest(c, L"GET", L"/repos/lambda-gab/cod2-vr/releases/latest", NULL,
+                                  WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (r && WinHttpSendRequest(r, L"Accept: application/vnd.github+json\r\n", (DWORD)-1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(r, NULL)) {
+        while (total < sizeof(body) - 1 && WinHttpReadData(r, body + total, sizeof(body) - 1 - total, &got) && got) total += got;
+    }
+    body[total] = 0;
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    if (s) WinHttpCloseHandle(s);
+    if ((tag = strstr(body, "\"tag_name\"")) && (tag = strchr(tag + 10, '"'))) {
+        char v[32];
+        int i;
+        tag++;
+        for (i = 0; i < 31 && tag[i] && tag[i] != '"'; i++) v[i] = tag[i];
+        v[i] = 0;
+        if (v[0] && NewerVersion(v, VERSION_TEXT)) {
+            MultiByteToWideChar(CP_UTF8, 0, v, -1, g_newVersion, 32);
+            PostMessageW(wnd, WM_UPDATE_FOUND, 0, 0);
+        }
+    }
+    return 0;
+}
+
+int WriteDiagnostics(const char *gameDir, const wchar_t *version, char *outPath, int outLen);
+
+static void DrawHome(HDC dc)
+{
+    Text(dc, g_fText, COL_TEXT, P(40), P(384), P(960), P(414),
+         L"The Call of Duty 2 single player campaign, in virtual reality.", DT_CENTER | DT_SINGLELINE);
+    if (!g_haveGame)
+        Text(dc, g_fSmall, RGB(230, 110, 90), P(40), P(420), P(960), P(470),
+             L"CoD2SP_s.exe was not found: put this launcher in the game folder (where CoD2SP_s.exe is).", DT_CENTER | DT_WORDBREAK);
+    else if (!g_haveMod)
+        Text(dc, g_fSmall, RGB(230, 110, 90), P(40), P(420), P(960), P(470),
+             L"The VR mod is not installed in this folder: copy d3d9.dll, openxr_loader.dll and cod2_vr.ini here.", DT_CENTER | DT_WORDBREAK);
+    else
+        Text(dc, g_fSmall, COL_DIM, P(40), P(420), P(960), P(446),
+             L"Connect your headset (Virtual Desktop, Air Link or SteamVR with a 32-bit OpenXR runtime), then press PLAY.",
+             DT_CENTER | DT_WORDBREAK);
+    if (g_newVersion[0]) {
+        wchar_t line[128];
+        int hot = Hovered(HIT_LINK, 2);
+        _snwprintf(line, 128, L"A new version (%s) is available: click here to download it.", g_newVersion);
+        line[127] = 0;
+        Text(dc, g_fBold, hot ? RGB(255, 220, 120) : COL_GOLD, P(40), P(448), P(960), P(474), line, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        AddHit(P(250), P(448), P(750), P(474), HIT_LINK, 2);
+    }
+}
+
+static void DrawPageTitle(HDC dc, const wchar_t *title, const wchar_t *sub)
+{
+    Text(dc, g_fTitle, COL_GOLD, P(50), P(22), P(950), P(62), title, DT_SINGLELINE);
+    if (sub) Text(dc, g_fSmall, COL_DIM, P(50), P(62), P(950), P(84), sub, DT_SINGLELINE);
+}
+
+// Rows opts[first .. first + n - 1] from y = top; returns the one under the mouse, or -1.
+static int DrawRows(HDC dc, option_t *opts, int first, int n, int rowH, int top)
+{
+    int j, hint = -1;
+    for (j = 0; j < n; j++) {
+        int i = first + j;
+        option_t *o = &opts[i];
+        int y0 = P(top + j * rowH), y1 = P(top + (j + 1) * rowH - 4);
+        int vx0 = P(560), vx1 = P(950);
+        int hot = Hovered(HIT_ROW, i) || Hovered(HIT_PREV, i) || Hovered(HIT_NEXT, i);
+        const wchar_t *val = o->cur >= 0 ? o->names[o->cur] : L"Custom";
+        wchar_t withRes[96];
+        if (o->showRes && o->cur >= 0) {
+            // the eye size this gives, from what the headset asked for last time the game ran
+            int rw = GetPrivateProfileIntA("Headset", "RecommendedWidth", 0, g_userIni);
+            int rh = GetPrivateProfileIntA("Headset", "RecommendedHeight", 0, g_userIni);
+            int mw = GetPrivateProfileIntA("Headset", "MaxWidth", 0, g_userIni);
+            int mh = GetPrivateProfileIntA("Headset", "MaxHeight", 0, g_userIni);
+            double sc = atof(strchr(o->values[o->cur], '=') + 1);
+            if (rw > 0 && rh > 0) {
+                int w = (int)(rw * sc + 0.5), h = (int)(rh * sc + 0.5);
+                if (mw > 0 && w > mw) w = mw;
+                if (mh > 0 && h > mh) h = mh;
+                _snwprintf(withRes, 96, L"%s   %d\x00d7%d", val, w, h);
+                withRes[95] = 0;
+                val = withRes;
+            }
+        }
+        if (hot) { Fill(dc, P(40), y0, P(960), y1, RGB(34, 30, 20)); hint = i; }
+        Text(dc, g_fText, COL_TEXT, P(60), y0, P(540), y1, o->label, DT_SINGLELINE | DT_VCENTER);
+        Text(dc, g_fBold, Hovered(HIT_PREV, i) ? COL_GOLD : COL_DIM, vx0, y0, vx0 + P(40), y1, L"\x25C0", DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        Text(dc, g_fBold, COL_STEEL, vx0 + P(40), y0, vx1 - P(40), y1, val, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        Text(dc, g_fBold, Hovered(HIT_NEXT, i) ? COL_GOLD : COL_DIM, vx1 - P(40), y0, vx1, y1, L"\x25B6", DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        AddHit(vx0, y0, vx0 + P(40), y1, HIT_PREV, i);
+        AddHit(vx1 - P(40), y0, vx1, y1, HIT_NEXT, i);
+        AddHit(P(40), y0, P(960), y1, HIT_ROW, i);
+    }
+    return hint;
+}
+
+// A crosshair style (as the mod draws it: arms around a gap, a ring, a dot) in a dark square.
+static void DrawReticle(HDC dc, int style, int x0, int y0, int sz)
+{
+    int cx = x0 + sz / 2, cy = y0 + sz / 2, r = sz * 7 / 16, k;
+    int cross = style == 1 || style == 5, dot = style == 2 || style == 4 || style == 5, ring = style == 3 || style == 4;
+    HPEN pen = CreatePen(PS_SOLID, P(1) > 1 ? P(1) : 1, RGB(235, 235, 235));
+    HBRUSH white = CreateSolidBrush(RGB(235, 235, 235));
+    HGDIOBJ oldPen, oldBrush;
+    Fill(dc, x0, y0, x0 + sz, y0 + sz, RGB(52, 56, 50));
+    oldPen = SelectObject(dc, pen);
+    oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    if (style == 0) {   // none: a struck-through square
+        MoveToEx(dc, x0 + sz / 4, y0 + sz * 3 / 4, NULL);
+        LineTo(dc, x0 + sz * 3 / 4, y0 + sz / 4);
+    }
+    if (cross)
+        for (k = 0; k < 4; k++) {
+            int dx = k == 0 ? 1 : k == 1 ? -1 : 0, dy = k == 2 ? 1 : k == 3 ? -1 : 0;
+            MoveToEx(dc, cx + dx * r * 45 / 100, cy + dy * r * 45 / 100, NULL);
+            LineTo(dc, cx + dx * (r + 1), cy + dy * (r + 1));
+        }
+    if (ring) {
+        int rr = r * 7 / 10;
+        Ellipse(dc, cx - rr, cy - rr, cx + rr + 1, cy + rr + 1);
+    }
+    if (dot) {
+        int d = r / 4 > 1 ? r / 4 : 1;
+        SelectObject(dc, white);
+        Ellipse(dc, cx - d, cy - d, cx + d + 1, cy + d + 1);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(white);
+    DeleteObject(pen);
+}
+
+// Rows in a column from x0 to x1 (label, then the value with its arrows); returns the hovered one.
+static int DrawColumn(HDC dc, option_t *opts, int first, int n, int rowH, int top, int x0, int x1)
+{
+    int j, hint = -1, vx0 = P(x0 + 215), vx1 = P(x1);
+    for (j = 0; j < n; j++) {
+        int i = first + j;
+        option_t *o = &opts[i];
+        int y0 = P(top + j * rowH), y1 = P(top + (j + 1) * rowH - 4);
+        int hot = Hovered(HIT_ROW, i) || Hovered(HIT_PREV, i) || Hovered(HIT_NEXT, i);
+        const wchar_t *val = o->cur >= 0 ? o->names[o->cur] : L"Custom";
+        if (hot) { Fill(dc, P(x0), y0, P(x1), y1, RGB(34, 30, 20)); hint = i; }
+        Text(dc, g_fText, COL_TEXT, P(x0 + 12), y0, vx0, y1, o->label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        Text(dc, g_fBold, Hovered(HIT_PREV, i) ? COL_GOLD : COL_DIM, vx0, y0, vx0 + P(26), y1, L"\x25C0", DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        if (o->reticle && o->cur >= 0) {   // the picture, then the name
+            int sz = y1 - y0 - P(6);
+            DrawReticle(dc, o->cur, vx0 + P(34), y0 + P(3), sz);
+            Text(dc, g_fBold, COL_STEEL, vx0 + P(42) + sz, y0, vx1 - P(26), y1, val, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
+        } else
+        Text(dc, g_fBold, COL_STEEL, vx0 + P(26), y0, vx1 - P(26), y1, val, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
+        Text(dc, g_fBold, Hovered(HIT_NEXT, i) ? COL_GOLD : COL_DIM, vx1 - P(26), y0, vx1, y1, L"\x25B6", DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        AddHit(vx0, y0, vx0 + P(26), y1, HIT_PREV, i);
+        AddHit(vx1 - P(26), y0, vx1, y1, HIT_NEXT, i);
+        AddHit(P(x0), y0, P(x1), y1, HIT_ROW, i);
+    }
+    return hint;
+}
+
+static void DrawHint(HDC dc, option_t *opts, int hint)
+{
+    if (hint >= 0)
+        Text(dc, g_fSmall, COL_DIM, P(50), P(444), P(950), P(476),
+             opts[hint].choiceHints && opts[hint].cur >= 0 ? opts[hint].choiceHints[opts[hint].cur] : opts[hint].hint,
+             DT_SINGLELINE | DT_END_ELLIPSIS);
+    else
+        Text(dc, g_fSmall, COL_DIM, P(50), P(444), P(950), P(476),
+             L"Click a setting to change it. Changes are saved at once and used the next time the game starts.", DT_SINGLELINE);
+}
+
+static void DrawOptions(HDC dc, option_t *opts, int n, int rowH, int top)
+{
+    DrawHint(dc, opts, DrawRows(dc, opts, 0, n, rowH, top));
+}
+
+static void DrawGraphics(HDC dc)
+{
+    DrawPageTitle(dc, L"GRAPHICS", L"The game's own options (Options in the game menu) still apply on top of these.");
+    DrawOptions(dc, g_gfxOpts, NUM_GFX, 40, 100);
+}
+
+static void DrawControls(HDC dc)
+{
+    static const wchar_t *buttons[][2] = {
+        { L"Right trigger", L"Fire" },
+        { L"Left trigger", L"Aim down the sights (hold)" },
+        { L"Right grip", L"Use / pick up" },
+        { L"Left grip", L"Melee" },
+        { L"Left stick", L"Move (where you look)" },
+        { L"Right stick", L"Turn; up / down: stance" },
+        { L"A / B", L"Jump / reload" },
+        { L"X / Y", L"Grenade / next weapon" },
+        { L"Left stick click", L"Objectives" },
+        { L"Right stick click", L"Go prone" },
+        { L"Menu", L"Game menu" },
+    };
+    int i;
+    DrawPageTitle(dc, L"CONTROLS", L"Touch controllers. Buttons can be changed in cod2_vr.ini, [Buttons].");
+    Text(dc, g_fBold, COL_GOLD, P(50), P(96), P(470), P(120), L"Playing", DT_SINGLELINE);
+    Text(dc, g_fSmall, COL_DIM, P(50), P(126), P(470), P(440),
+         L"You aim where you look: the gun follows your head, and the left stick walks the way you face.\n\n"
+         L"In the menus, point with your hand: trigger clicks, B goes back, A confirms. "
+         L"Menus stay where they opened, so you can look around them.\n\n"
+         L"Holding the gun in your hand, taking weapons from your body and the other features of the "
+         L"Call of Duty 1 VR mod are coming in the next versions.",
+         DT_WORDBREAK);
+    Text(dc, g_fBold, COL_GOLD, P(520), P(96), P(950), P(120), L"Buttons", DT_SINGLELINE);
+    for (i = 0; i < (int)(sizeof(buttons) / sizeof(buttons[0])); i++) {
+        int y = P(126 + i * 29);
+        Text(dc, g_fText, COL_TEXT, P(520), y, P(720), y + P(28), buttons[i][0], DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        Text(dc, g_fText, COL_STEEL, P(720), y, P(960), y + P(28), buttons[i][1], DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+}
+
+static void DrawAbout(HDC dc)
+{
+    DrawPageTitle(dc, L"ABOUT", L"Call of Duty 2 VR " VERSION_TEXT);
+    Text(dc, g_fText, COL_TEXT, P(50), P(100), P(950), P(200),
+         L"A free, fan-made mod that turns the Call of Duty 2 single player campaign into a PC VR game, "
+         L"from the makers of the Call of Duty 1 VR mod.\n\n"
+         L"The project is in early development and bugs can happen. Please report them on Discord.",
+         DT_WORDBREAK);
+    Text(dc, g_fBold, Hovered(HIT_LINK, 0) ? COL_GOLD : COL_STEEL, P(50), P(250), P(600), P(280),
+         L"GitHub: download, updates and documentation", DT_SINGLELINE);
+    AddHit(P(50), P(250), P(600), P(280), HIT_LINK, 0);
+    Text(dc, g_fBold, Hovered(HIT_LINK, 1) ? COL_GOLD : COL_STEEL, P(50), P(290), P(600), P(320),
+         L"Discord: bugs, suggestions and news", DT_SINGLELINE);
+    AddHit(P(50), P(290), P(600), P(320), HIT_LINK, 1);
+    Text(dc, g_fBold, Hovered(HIT_LINK, 3) ? COL_GOLD : COL_STEEL, P(50), P(330), P(900), P(360),
+         L"Problem starting in VR? Save a diagnostic report to send on Discord", DT_SINGLELINE);
+    AddHit(P(50), P(330), P(900), P(360), HIT_LINK, 3);
+    Text(dc, g_fSmall, COL_DIM, P(50), P(380), P(950), P(470),
+         L"Unofficial fan project, not affiliated with or endorsed by Activision. Call of Duty is a trademark of "
+         L"Activision Publishing, Inc. A legitimate copy of the game is required; no game files are included.",
+         DT_WORDBREAK);
+}
+
+static void DrawBar(HDC dc)
+{
+    static const wchar_t *names[] = { L"CONTROLS", L"GRAPHICS", L"VR", L"ABOUT" };
+    static const int pages[] = { PAGE_CONTROLS, PAGE_GRAPHICS, PAGE_VR, PAGE_ABOUT };
+    static const int widths[] = { 130, 130, 60, 100 };
+    int i, x = P(240);
+    Fill(dc, 0, P(BAR_Y), P(BASE_W), P(BASE_H), COL_BAR);
+    Fill(dc, 0, P(BAR_Y), P(BASE_W), P(BAR_Y) + P(2), COL_GOLD_DARK);
+    // PLAY
+    {
+        int x0 = P(30), y0 = P(BAR_Y + 14), x1 = P(210), y1 = P(BASE_H - 14);
+        int hot = Hovered(HIT_PLAY, 0), running = GameRunning();
+        Fill(dc, x0, y0, x1, y1, running ? COL_GOLD_DARK : hot ? RGB(236, 192, 80) : COL_GOLD);
+        Text(dc, running ? g_fNav : g_fPlay, RGB(20, 16, 6), x0, y0, x1, y1, running ? L"RUNNING" : L"PLAY",
+             DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        AddHit(x0, y0, x1, y1, HIT_PLAY, 0);
+    }
+    for (i = 0; i < 4; i++) {
+        int page = pages[i], w = P(widths[i]);
+        int on = g_page == page, hot = Hovered(HIT_NAV, page);
+        int y0 = P(BAR_Y + 14), y1 = P(BASE_H - 14);
+        Text(dc, g_fNav, on || hot ? COL_GOLD : COL_TEXT, x, y0, x + w, y1, names[i], DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        if (on) Fill(dc, x + P(16), y1 - P(4), x + w - P(16), y1 - P(1), COL_GOLD);
+        AddHit(x, y0, x + w, y1, HIT_NAV, page);
+        x += w + P(12);
+    }
+    Text(dc, g_fSmall, COL_DIM, P(900), P(BAR_Y + 14), P(980), P(BASE_H - 14), VERSION_TEXT, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+}
+
+static void Paint(HWND wnd, HDC wdc)
+{
+    RECT rc;
+    HDC dc;
+    HBITMAP bmp;
+    HGDIOBJ old;
+    GetClientRect(wnd, &rc);
+    dc = CreateCompatibleDC(wdc);
+    bmp = CreateCompatibleBitmap(wdc, rc.right, rc.bottom);
+    old = SelectObject(dc, bmp);
+    SetBkMode(dc, TRANSPARENT);
+    g_numHits = 0;
+
+    DrawBanner(dc);
+    if (g_page == PAGE_HOME) {
+        DrawHome(dc);
+    } else {
+        Veil(dc, 0, 0, P(BASE_W), P(BAR_Y), 225);
+        if (g_page == PAGE_CONTROLS) DrawControls(dc);
+        else if (g_page == PAGE_GRAPHICS) {
+            DrawGraphics(dc);
+        } else if (g_page == PAGE_VR) {
+            int h1, h2;
+            DrawPageTitle(dc, L"VR", NULL);
+            Text(dc, g_fBold, COL_GOLD, P(40), P(66), P(480), P(90), L"MOVEMENT AND AIM", DT_SINGLELINE | DT_VCENTER);
+            Text(dc, g_fBold, COL_GOLD, P(510), P(66), P(960), P(90), L"VIEW AND SCREENS", DT_SINGLELINE | DT_VCENTER);
+            h1 = DrawColumn(dc, g_vrOpts, 0, VR_COL2, 31, 94, 40, 480);
+            h2 = DrawColumn(dc, g_vrOpts, VR_COL2, NUM_VR - VR_COL2, 34, 94, 510, 960);
+            DrawHint(dc, g_vrOpts, h1 >= 0 ? h1 : h2);
+        } else if (g_page == PAGE_ABOUT) DrawAbout(dc);
+    }
+    DrawBar(dc);
+
+    BitBlt(wdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, old);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+static int HitAt(int x, int y)
+{
+    int i;
+    POINT p = { x, y };
+    for (i = 0; i < g_numHits; i++) if (PtInRect(&g_hits[i].r, p)) return i;
+    return -1;
+}
+
+static option_t *PageOption(int i)
+{
+    if (g_page == PAGE_VR && i < NUM_VR) return &g_vrOpts[i];
+    if (g_page == PAGE_GRAPHICS && i < NUM_GFX) return &g_gfxOpts[i];
+    return NULL;
+}
+
+static void Click(HWND wnd, int idx)
+{
+    hit_t *h;
+    option_t *o;
+    if (idx < 0) return;
+    h = &g_hits[idx];
+    switch (h->type) {
+    case HIT_PLAY:
+        StartGame(wnd);
+        break;
+    case HIT_NAV:
+        g_page = g_page == h->arg ? PAGE_HOME : h->arg;
+        break;
+    case HIT_PREV:
+    case HIT_NEXT:
+    case HIT_ROW:
+        o = PageOption(h->arg);
+        if (!o) break;
+        if (o->cur < 0) o->cur = o->def;
+        else if (h->type == HIT_PREV) o->cur = (o->cur + o->count - 1) % o->count;
+        else o->cur = (o->cur + 1) % o->count;
+        SaveOption(o);
+        break;
+    case HIT_LINK:
+        if (h->arg == 3) {
+            char out[MAX_PATH], arg[MAX_PATH + 16];
+            wchar_t msg[MAX_PATH + 200], wout[MAX_PATH];
+            if (!WriteDiagnostics(g_dir, VERSION_TEXT, out, MAX_PATH)) {
+                MessageBoxW(wnd, L"The report could not be written.", L"CoD2 VR", MB_OK | MB_ICONWARNING);
+                break;
+            }
+            MultiByteToWideChar(CP_ACP, 0, out, -1, wout, MAX_PATH);
+            _snwprintf(msg, MAX_PATH + 200, L"The report was saved here:\n\n%s\n\nSend this file on Discord.", wout);
+            MessageBoxW(wnd, msg, L"CoD2 VR", MB_OK | MB_ICONINFORMATION);
+            _snprintf(arg, sizeof(arg), "/select,\"%s\"", out);
+            ShellExecuteA(wnd, "open", "explorer.exe", arg, NULL, SW_SHOWNORMAL);
+            break;
+        }
+        ShellExecuteA(wnd, "open", h->arg == 2 ? URL_RELEASES : h->arg ? URL_DISCORD : URL_GITHUB, NULL, NULL, SW_SHOWNORMAL);
+        break;
+    }
+    InvalidateRect(wnd, NULL, FALSE);
+}
+
+static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(wnd, &ps);
+        Paint(wnd, dc);
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_TIMER: {
+        static int was;
+        int now = GameRunning();
+        if (now != was) { was = now; InvalidateRect(wnd, NULL, FALSE); }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        int h = HitAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, wnd, 0 };
+        TrackMouseEvent(&tme);
+        if (h != g_hover) { g_hover = h; InvalidateRect(wnd, NULL, FALSE); }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_hover != -1) { g_hover = -1; InvalidateRect(wnd, NULL, FALSE); }
+        return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursor(NULL, g_hover >= 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        Click(wnd, HitAt(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) {
+            if (g_page != PAGE_HOME) { g_page = PAGE_HOME; InvalidateRect(wnd, NULL, FALSE); }
+            else PostMessageW(wnd, WM_CLOSE, 0, 0);
+        } else if (wp == VK_RETURN) {
+            StartGame(wnd);
+            InvalidateRect(wnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_UPDATE_FOUND:
+        InvalidateRect(wnd, NULL, FALSE);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+// The banner is a JPEG resource, decoded by OLE (no image library needed).
+static void LoadBanner(HINSTANCE inst)
+{
+    HRSRC res = FindResourceW(inst, MAKEINTRESOURCEW(IDR_BANNER), (LPCWSTR)RT_RCDATA);
+    DWORD size = res ? SizeofResource(inst, res) : 0;
+    const void *data = res ? LockResource(LoadResource(inst, res)) : NULL;
+    HGLOBAL mem;
+    IStream *stream = NULL;
+    IPicture *pic = NULL;
+    if (!data || !size) return;
+    mem = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!mem) return;
+    memcpy(GlobalLock(mem), data, size);
+    GlobalUnlock(mem);
+    if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &stream))) { GlobalFree(mem); return; }
+    if (SUCCEEDED(OleLoadPicture(stream, (LONG)size, FALSE, &IID_IPicture, (void **)&pic)) && pic) {
+        OLE_HANDLE h = 0;
+        if (SUCCEEDED(pic->lpVtbl->get_Handle(pic, &h)) && h) {
+            BITMAP bm;
+            g_banner = (HBITMAP)CopyImage((HANDLE)(UINT_PTR)h, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+            if (g_banner && GetObject(g_banner, sizeof(bm), &bm)) { g_bannerW = bm.bmWidth; g_bannerH = bm.bmHeight; }
+        }
+        pic->lpVtbl->Release(pic);
+    }
+    stream->lpVtbl->Release(stream);
+}
+
+static HFONT MakeFont(int px, int weight, const wchar_t *face)
+{
+    return CreateFontW(-P(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
+}
+
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmdLine, int show)
+{
+    WNDCLASSEXW wc;
+    HWND wnd;
+    MSG msg;
+    RECT r;
+    HDC screen;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    char path[MAX_PATH], *slash;
+    const char *appdata = getenv("APPDATA");
+    (void)prev; (void)cmdLine;
+
+    GetModuleFileNameA(NULL, path, sizeof(path));
+    slash = strrchr(path, '\\');
+    if (slash) *slash = 0;
+    strcpy(g_dir, path);
+    {
+        // started through a link in the game folder: Windows reports the link's target as the
+        // module, so look in the folder it was started from too
+        char cwd[MAX_PATH];
+        _snprintf(path, sizeof(path), "%s\\CoD2SP_s.exe", g_dir);
+        if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES && GetCurrentDirectoryA(sizeof(cwd), cwd)) {
+            _snprintf(path, sizeof(path), "%s\\CoD2SP_s.exe", cwd);
+            if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) strcpy(g_dir, cwd);
+        }
+    }
+    _snprintf(g_gameIni, sizeof(g_gameIni), "%s\\cod2_vr.ini", g_dir);
+    _snprintf(g_userIni, sizeof(g_userIni), "%s\\CoD2-VR\\settings.ini", appdata ? appdata : g_dir);
+    _snprintf(path, sizeof(path), "%s\\CoD2SP_s.exe", g_dir);
+    g_haveGame = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    _snprintf(path, sizeof(path), "%s\\d3d9.dll", g_dir);
+    g_haveMod = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    LoadAll();
+
+    screen = GetDC(NULL);
+    g_scale = GetDeviceCaps(screen, LOGPIXELSX) / 96.0f;
+    ReleaseDC(NULL, screen);
+    if (g_scale < 1.0f) g_scale = 1.0f;
+
+    CoInitialize(NULL);
+    LoadBanner(inst);
+    g_fTitle = MakeFont(30, FW_BOLD, L"Segoe UI");
+    g_fNav   = MakeFont(19, FW_BOLD, L"Segoe UI");
+    g_fPlay  = MakeFont(24, FW_HEAVY, L"Segoe UI");
+    g_fText  = MakeFont(17, FW_NORMAL, L"Segoe UI");
+    g_fBold  = MakeFont(17, FW_BOLD, L"Segoe UI");
+    g_fSmall = MakeFont(14, FW_NORMAL, L"Segoe UI");
+
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_LAUNCHER));
+    wc.lpszClassName = L"CoD2VRLauncher";
+    RegisterClassExW(&wc);
+
+    SetRect(&r, 0, 0, P(BASE_W), P(BASE_H));
+    AdjustWindowRect(&r, style, FALSE);
+    wnd = CreateWindowExW(0, wc.lpszClassName, L"Call of Duty 2 VR", style,
+                          (GetSystemMetrics(SM_CXSCREEN) - (r.right - r.left)) / 2,
+                          (GetSystemMetrics(SM_CYSCREEN) - (r.bottom - r.top)) / 2,
+                          r.right - r.left, r.bottom - r.top, NULL, NULL, inst, NULL);
+    if (!wnd) return 1;
+    ShowWindow(wnd, show);
+    UpdateWindow(wnd);
+    SetTimer(wnd, 1, 1000, NULL);   // PLAY comes back when the game is closed
+    CloseHandle(CreateThread(NULL, 0, UpdateCheckThread, wnd, 0, NULL));
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    CoUninitialize();
+    return 0;
+}

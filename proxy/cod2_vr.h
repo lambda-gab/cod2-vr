@@ -21,6 +21,7 @@ void VR_DeviceCreated(IDirect3DDevice9Ex *dev, const D3DPRESENT_PARAMETERS *pp);
 void VR_DeviceReset(const D3DPRESENT_PARAMETERS *pp);   // after a successful Reset
 void VR_BeforePresent(void);    // the frame is complete in the back buffer's place
 void VR_AfterPresent(void);
+void VR_OnCreateCmd(void);       // controls.c: a usercmd is being made (CL_FinishMove)
 
 // ---- OpenXR backend (vr_xr.c) ----
 // One eye (or the head) in tracking space, converted to Quake 3 conventions:
@@ -78,3 +79,6 @@ typedef struct {
 
 void XR_GetInput(vr_input_t *in);
 void XR_Haptic(int hand, float amplitude, int ms);
+// Menu pointer this frame: a beam from 'from' to 'to' (tracking space, Quake axes, metres), with a
+// spot at the end when it hits the screen. Cleared by XR_BeginFrame.
+void XR_SetLaser(const float from[3], const float to[3], int hit);

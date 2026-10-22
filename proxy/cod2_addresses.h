@@ -16,6 +16,8 @@
 #define ADDR_CG_DrawActive         0x004bfbf0   // fills cg.refdef and calls re.RenderScene
 #define ADDR_CG_RenderScene_ret    0x004bfcd3   // return address of that call (the world view)
 #define ADDR_cg_refdef             0x00f79138   // refdef_t of the world view
+#define ADDR_intro_legal           0x00575ce4   // "unskippablecinematic legal\n", queued by Com_Init (0x42e7c7)
+#define ADDR_intro_check           0x0042e7e0   // jne over the logo videos when com_introPlayed (75 67)
 #define ADDR_cl_viewangles         0x00621584   // float[3]: pitch, yaw, roll (CL_AdjustAngles 0x409400, CL_MouseMove 0x409720)
 #define ADDR_cvar_sensitivity      0x00617c64   // cvar_t*, value at +8
 #define ADDR_Cbuf_AddText          0x0041afc0   // text in EAX (as the snd_restart call at 0x42753e)

@@ -47,11 +47,12 @@ static struct {
     vr_hud_t hud;        // quad placement
     int   mirror;        // show the left eye in the game window
     int   traceCmds;     // diagnostics: log the backend commands of this many world frames
+    int   skipIntro;     // 1 = straight to the menu (no legal screen, no logo videos)
     int   menuFollowsHead; // 1 = menus follow the head, 0 = fixed in the room where they opened
     int   fakeHmd;       // diagnostics: the headset path with made-up eyes, shown side by side
     int   fakeW, fakeH;  // ... their resolution
     int   fakeCursor[2]; // ... where the menu cursor is put (640x480)
-} cfg = { 1, 1, 1, 2.5f, 39.37f, 1, 1, 1.0f, 10.0f, { 0, 1, 1.4f, -0.05f, 1.0f, 1.8f }, 1, 0, 0, 0, 1440, 1584, { 395, 300 } };
+} cfg = { 1, 1, 1, 2.5f, 39.37f, 1, 1, 1.0f, 10.0f, { 0, 1, 1.4f, -0.05f, 1.0f, 1.8f }, 1, 0, 1, 0, 0, 1440, 1584, { 395, 300 } };
 
 static FILE *g_log;
 static char  g_userIni[MAX_PATH];
@@ -149,6 +150,7 @@ static void LoadConfig(void)
     cfg.fakeCursor[0] = GetInt("Debug", "FakeCursorX", cfg.fakeCursor[0]);
     cfg.fakeCursor[1] = GetInt("Debug", "FakeCursorY", cfg.fakeCursor[1]);
     cfg.menuFollowsHead = GetInt("HUD", "MenuFollowsHead", 0);
+    cfg.skipIntro = GetInt("General", "SkipIntro", 1);
     Controls_LoadConfig(GetInt, GetFloat, GetStr);
     if (!cfg.enabled) g_useEx = 0;
     XR_SetRenderScale(cfg.renderScale);
@@ -162,6 +164,28 @@ static DWORD PeTimestamp(DWORD base)
     return ((IMAGE_NT_HEADERS *)(base + dos->e_lfanew))->FileHeader.TimeDateStamp;
 }
 
+// Com_Init queues "unskippablecinematic legal" and, unless com_introPlayed is set, the logo
+// videos. The first is blanked out (same length) and the check of the second always passes.
+static void SkipIntro(void)
+{
+    static const char legal[] = "unskippablecinematic legal\n";
+    char *str = (char *)ADDR_intro_legal;
+    BYTE *jne = (BYTE *)ADDR_intro_check;
+    DWORD old;
+    if (memcmp(str, legal, sizeof(legal)) || jne[0] != 0x75 || jne[1] != 0x67) {
+        Log("intro: unexpected bytes, not skipped");
+        return;
+    }
+    VirtualProtect(str, sizeof(legal), PAGE_EXECUTE_READWRITE, &old);
+    memset(str, ' ', sizeof(legal) - 2);
+    VirtualProtect(str, sizeof(legal), old, &old);
+    VirtualProtect(jne, 1, PAGE_EXECUTE_READWRITE, &old);
+    jne[0] = 0xEB;
+    VirtualProtect(jne, 1, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), jne, 2);
+    Log("intro skipped");
+}
+
 void VR_ProcessAttach(HMODULE self)
 {
     char *p;
@@ -173,7 +197,9 @@ void VR_ProcessAttach(HMODULE self)
         Log("not CoD2SP_s.exe 1.3 (timestamp %08x): passthrough only", PeTimestamp((DWORD)GetModuleHandleA(NULL)));
         cfg.enabled = 0;
         g_useEx = 0;
+        return;
     }
+    if (cfg.enabled && cfg.skipIntro) SkipIntro();
 }
 
 // ---------------------------------------------------------------------------
@@ -595,12 +621,19 @@ static void UpdateViewAngles(void)
     float *va = (float *)ADDR_cl_viewangles;
     float yaw = YawOf(g_head.axis[0]), pitch = PitchOf(g_head.axis[0]);
     if (!g_headYawInit) { g_headYawPrev = yaw; g_headYawInit = 1; }
-    g_headYawCmd = g_headYawPrev;
-    g_clPitchCmd = va[PITCH];
     if (!cfg.headAim) return;
     va[YAW] += AngleNormalize180(yaw - g_headYawPrev);
     g_headYawPrev = yaw;
     if (g_pitchOffsetInit) va[PITCH] = pitch - g_pitchOffset;
+}
+
+// CL_FinishMove: the usercmd of the frame about to be drawn is made from cl.viewangles as they
+// are now. The view the cgame draws this frame comes from it, so what the head put into it
+// (yaw) and the pitch sent are taken here, not when they were written.
+void VR_OnCreateCmd(void)
+{
+    g_headYawCmd = g_headYawPrev;
+    g_clPitchCmd = ((float *)ADDR_cl_viewangles)[PITCH];
 }
 
 static void FakeEyes(void)

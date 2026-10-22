@@ -6,17 +6,11 @@
 // missing loader only disables VR.
 #define _CRT_SECURE_NO_WARNINGS
 #include "cod2_vr.h"
+#include "overlay.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
-#include <d3d11.h>
 #include <dxgi.h>
-
-#define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_D3D11
-#define XR_NO_PROTOTYPES
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
 
 static PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr;
 #define XR_FUNCS(X) \
@@ -38,7 +32,9 @@ static PFN_xrCreateInstance xrCreateInstance_;
 #define SC_EYE0 0
 #define SC_EYE1 1
 #define SC_HUD  2
-#define SC_COUNT 3
+#define SC_OVL0 3   // lines over everything, per eye
+#define SC_OVL1 4
+#define SC_COUNT 5
 
 static struct {
     int        failed;
@@ -56,6 +52,7 @@ static struct {
     XrSwapchainImageD3D11KHR images[SC_COUNT][MAX_IMAGES];
     int        renderW, renderH;
     int        hudW, hudH;
+    DXGI_FORMAT format;          // of every swapchain
     ID3D11Device        *dev;
     ID3D11DeviceContext *ctx;
     ID3D11Texture2D     *shared[SC_COUNT];   // what the game renders into
@@ -202,7 +199,7 @@ static int CreateSwapchain(int i, int64_t format, int w, int h)
     xr.scH[i] = h;
     for (k = 0; k < MAX_IMAGES; k++) xr.images[i][k].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
     CHECK(xrEnumerateSwapchainImages(xr.swapchain[i], MAX_IMAGES, &xr.imageCount[i], (XrSwapchainImageBaseHeader *)xr.images[i]));
-    Log("OpenXR: %s swapchain %dx%d, %u images", i == SC_HUD ? "HUD" : i ? "right eye" : "left eye", w, h, xr.imageCount[i]);
+    Log("OpenXR: %s swapchain %dx%d, %u images", i >= SC_OVL0 ? "overlay" : i == SC_HUD ? "HUD" : i ? "right eye" : "left eye", w, h, xr.imageCount[i]);
     return 1;
 }
 
@@ -355,6 +352,7 @@ static int CreateSession(LUID gameLuid)
     format = PickFormat();
     if (!format) return 0;
     Log("OpenXR: swapchain format %lld", format);
+    xr.format = (DXGI_FORMAT)format;
 
     xr_recW = vcv[0].recommendedImageRectWidth; xr_recH = vcv[0].recommendedImageRectHeight;
     xr_maxW = vcv[0].maxImageRectWidth; xr_maxH = vcv[0].maxImageRectHeight;
@@ -369,6 +367,10 @@ static int CreateSession(LUID gameLuid)
     }
     Log("OpenXR: eyes %dx%d (recommended %dx%d, RenderScale %.2f)", xr.renderW, xr.renderH, xr_recW, xr_recH, xr_renderScale);
     if (!CreateSwapchain(SC_HUD, format, xr.hudW, xr.hudH) || !CreateShared(SC_HUD, xr.hudW, xr.hudH)) return 0;
+    // the overlay is optional: without it there is no pointer line, nothing else changes
+    if (Overlay_Init(xr.dev, xr.ctx) &&
+        (!CreateSwapchain(SC_OVL0, format, xr.renderW, xr.renderH) || !CreateSwapchain(SC_OVL1, format, xr.renderW, xr.renderH)))
+        Log("OpenXR: no overlay swapchains");
     return 1;
 }
 
@@ -537,6 +539,7 @@ int XR_BeginFrame(vr_pose_t eyes[2], vr_pose_t *head)
 
     if (!xr.session) return 0;
     if (xr.frameOpen) XR_EndFrame(NULL);
+    Overlay_Clear();
     PollEvents();
     if (!xr.running) return 0;
 
@@ -599,6 +602,35 @@ static int CopyToSwapchain(int i)
     return 1;
 }
 
+// The overlay layer: lines drawn into each eye's overlay swapchain image.
+static int DrawOverlay(int eye)
+{
+    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    int sc = SC_OVL0 + eye;
+    uint32_t index;
+    if (!xr.swapchain[sc]) return 0;
+    if (XR_FAILED(xrAcquireSwapchainImage(xr.swapchain[sc], &ai, &index))) return 0;
+    wi.timeout = XR_INFINITE_DURATION;
+    if (XR_FAILED(xrWaitSwapchainImage(xr.swapchain[sc], &wi))) return 0;
+    Overlay_Draw(xr.images[sc][index].texture, xr.format, xr.scW[sc], xr.scH[sc], &xr.views[eye].pose, &xr.views[eye].fov);
+    xrReleaseSwapchainImage(xr.swapchain[sc], &ri);
+    return 1;
+}
+
+// Menu pointer: a beam from the hand to where it points (tracking space, Quake axes, metres).
+void XR_SetLaser(const float from[3], const float to[3], int hit)
+{
+    static const float beam[4] = { 0.2f * 0.9f, 0.9f * 0.9f, 1.0f * 0.9f, 0.9f };
+    static const float spot[4] = { 1, 1, 1, 1 };
+    float a[3], b[3];
+    FromQ3(from, a);
+    FromQ3(to, b);
+    Overlay_Line(a, b, 0.004f, beam);
+    if (hit) Overlay_Dot(b, 0.02f, spot);
+}
+
 static XrQuaternionf MatrixToQuat(const float c0[3], const float c1[3], const float c2[3])
 {
     XrQuaternionf q;
@@ -625,7 +657,9 @@ void XR_EndFrame(const vr_hud_t *hud)
     XrCompositionLayerProjection proj = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
     XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[2];
+    const XrCompositionLayerBaseHeader *layers[3];
+    XrCompositionLayerProjection ovl = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    XrCompositionLayerProjectionView ov[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     int i, n = 0, render;
 
     if (!xr.frameOpen) return;
@@ -673,6 +707,21 @@ void XR_EndFrame(const vr_hud_t *hud)
         quad.size.width = width;
         quad.size.height = width * xr.scH[SC_HUD] / xr.scW[SC_HUD];
         layers[n++] = (const XrCompositionLayerBaseHeader *)&quad;
+    }
+    // lines over everything (menu pointer)
+    if (render && !Overlay_Empty() && DrawOverlay(0) && DrawOverlay(1)) {
+        for (i = 0; i < 2; i++) {
+            ov[i].pose = xr.views[i].pose;
+            ov[i].fov = xr.views[i].fov;
+            ov[i].subImage.swapchain = xr.swapchain[SC_OVL0 + i];
+            ov[i].subImage.imageRect.extent.width = xr.scW[SC_OVL0 + i];
+            ov[i].subImage.imageRect.extent.height = xr.scH[SC_OVL0 + i];
+        }
+        ovl.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        ovl.space = xr.local;
+        ovl.viewCount = 2;
+        ovl.views = ov;
+        layers[n++] = (const XrCompositionLayerBaseHeader *)&ovl;
     }
     if (n) ID3D11DeviceContext_Flush(xr.ctx);
 

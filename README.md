@@ -20,7 +20,10 @@ A PC VR mod for the **Call of Duty 2 single player campaign** (`CoD2SP_s.exe` 1.
 - OpenXR (32-bit runtime: Virtual Desktop, Oculus/Meta, SteamVR beta), with the game's Direct3D 9 device turned
   into a D3D9Ex device that shares the eye images with a D3D11 OpenXR session.
 - Head tracking (rotation and position); the game aims where you look.
-- HUD and menus on a floating screen; menus stay where they opened, and you point at them with the controller.
+- HUD and menus on a floating screen; menus stay where they opened, and you point at them with the controller
+  (a beam from the hand, drawn in a layer of its own over everything).
+- Straight to the main menu (no legal screen and logo videos).
+- The first person arms hidden, so only the gun is drawn (optional data pack, see below).
 - Touch controllers: buttons to game commands, stick walking, snap or smooth turning, stance on the stick.
 - Without a headset: both eyes side by side on the monitor.
 - Launcher with PLAY, CONTROLS, GRAPHICS, VR and ABOUT.
@@ -37,6 +40,16 @@ vibration, vehicles, comfort vignette, the MODS page and the installer of the Co
    game's thread and the eye images without multisampling).
 
 Delete those files to uninstall.
+
+### Hiding the arms (optional data pack)
+
+```
+python tools/build_iwd.py "<game folder>"
+```
+
+Then copy `mods/out/zz_cod2vr.iwd` to `<game folder>\main`. It is made from your own copy of the game: the
+first person arm models (`xmodel/viewmodel_hands*`) point at a new material whose texture is fully transparent.
+Delete it to get the arms back.
 
 ## Controls
 

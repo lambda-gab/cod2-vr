@@ -134,6 +134,26 @@ Comandos de botão do CoD2 (tabela em `0x5a4e80`): `+attack +activate +reload +u
 toggleads leaveads +speed +gostand raisestance lowerstance toggleprone +prone +leanleft +leanright weapnext
 weapprev "weaponslot primary" "weaponslot primaryb" +binoculars +holdbreath +scores`.
 
+## Segunda rodada (após o primeiro teste no headset)
+
+- **Abertura:** o `Com_Init` enfileira `unskippablecinematic legal` (string em `0x575ce4`, copiada com tamanho fixo)
+  e, se `com_introPlayed` (cvar em `0x74a920`) for 0, `cinematic atvi` e `IW_logo`. O mod troca a primeira por
+  espaços (mesmo tamanho) e torna incondicional o `jne` de `0x42e7e0` (`75 67` → `EB 67`). `[General] SkipIntro`.
+- **Braços:** só os 9 `xmodel/viewmodel_hands*` têm materiais de braço (as armas não). O xmodel tem o mesmo
+  formato do CoD1 (`ff ff ff ff 00 00 00 00`, `u16` nº de materiais, nomes com NUL). `tools/build_iwd.py` gera
+  `zz_cod2vr.iwd` com esses modelos apontando para `mtl_vr_invisible`: cópia do material `hill400_treeline01`
+  (técnica `phong_alphatest`) com as strings refeitas — cabeçalho de `0x5c` bytes, nome em `+0x00`, imagem de
+  referência `+0x04`, técnica `+0x38`, tabela de texturas `+0x3c` com `+0x34` entradas `{semântica, flags, imagem}` —
+  e `colorMap` = `images/vr_invisible.iwi` (IWi v5, DXT1 4×4, `color0 = color1 = 0`, índices `0xFF`: tudo
+  transparente). Validado no jogo (`demolition`): só a arma aparece. O jogo carrega um `.iwd` com qualquer nome em `main`.
+- **Flick da arma:** os ângulos da cabeça entram em `cl.viewangles` no `Present`, ou seja, antes do `CL_CreateCmd`
+  do frame seguinte (no CoD1 era depois). O yaw da cabeça já embutido na vista e o pitch enviado eram guardados
+  um frame atrasados: o corpo girava pela diferença do movimento da cabeça a cada frame e o offset de pitch oscilava.
+  Agora são lidos no `CL_FinishMove` (`VR_OnCreateCmd`), quando o usercmd daquele frame é feito.
+- **Linha dos menus:** `overlay.c`, camada de projeção extra com uma swapchain por olho. A geometria é projetada na
+  CPU com a pose e o FOV de cada olho; os shaders (compilados com `d3dcompiler_47.dll`) só repassam posição e cor.
+  Validado fora do jogo com `proxy/test/overlaytest.c` (o fim da linha cai no pixel calculado).
+
 ## Ainda não verificado / próximos passos
 
 - **Nada foi testado com headset**: sessão OpenXR, cópia das texturas compartilhadas, layers, poses e controles

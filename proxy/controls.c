@@ -138,8 +138,8 @@ static void Cross(const float a[3], const float b[3], float o[3])
 static float Dot(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
 // Where the hand's ray meets the screen (pose: axis[0] away from the viewer, axis[1] left,
-// axis[2] up; width x height metres): 0..1 across and down, 0 = misses.
-static int PointAt(const vr_pose_t *hand, const vr_pose_t *scr, float w, float h, float *u, float *v)
+// axis[2] up; width x height metres): 0..1 across and down and the point, 0 = misses.
+static int PointAt(const vr_pose_t *hand, const vr_pose_t *scr, float w, float h, float *u, float *v, float at[3])
 {
     float d = Dot(hand->axis[0], scr->axis[0]), rel[3], t, hit[3];
     int i;
@@ -147,7 +147,10 @@ static int PointAt(const vr_pose_t *hand, const vr_pose_t *scr, float w, float h
     for (i = 0; i < 3; i++) rel[i] = scr->pos[i] - hand->pos[i];
     t = Dot(rel, scr->axis[0]) / d;
     if (t <= 0) return 0;
-    for (i = 0; i < 3; i++) hit[i] = hand->pos[i] + hand->axis[0][i] * t - scr->pos[i];
+    for (i = 0; i < 3; i++) {
+        at[i] = hand->pos[i] + hand->axis[0][i] * t;
+        hit[i] = at[i] - scr->pos[i];
+    }
     *u = 0.5f - Dot(hit, scr->axis[1]) / w;
     *v = 0.5f - Dot(hit, scr->axis[2]) / h;
     return *u > -0.1f && *u < 1.1f && *v > -0.1f && *v < 1.1f;
@@ -176,11 +179,18 @@ static void ClickFn(int unused, int down) { (void)unused; SendClick(down); }
 
 static void MenuControls(const vr_pose_t *screen, float w, float h)
 {
-    int dom = ccfg.rightHanded ? 1 : 0;
-    float u, v;
-    if (g_in.handValid[dom] && PointAt(&g_in.hand[dom], screen, w, h, &u, &v)) {
-        int x = (int)(u * 640.0f), y = (int)(v * 480.0f);
-        MoveCursorTo(x < 0 ? 0 : x > 640 ? 640 : x, y < 0 ? 0 : y > 480 ? 480 : y);
+    int dom = ccfg.rightHanded ? 1 : 0, i;
+    float u, v, at[3];
+    if (g_in.handValid[dom]) {
+        const vr_pose_t *hand = &g_in.hand[dom];
+        if (PointAt(hand, screen, w, h, &u, &v, at)) {
+            int x = (int)(u * 640.0f), y = (int)(v * 480.0f);
+            MoveCursorTo(x < 0 ? 0 : x > 640 ? 640 : x, y < 0 ? 0 : y > 480 ? 480 : y);
+            XR_SetLaser(hand->pos, at, 1);
+        } else {
+            for (i = 0; i < 3; i++) at[i] = hand->pos[i] + hand->axis[0][i] * 3.0f;   // pointing away: 3 m of beam
+            XR_SetLaser(hand->pos, at, 0);
+        }
     }
     MenuButton(0, g_in.trigger[dom] > 0.6f, ClickFn, 0);
     MenuButton(1, (g_in.buttons & VRB_A) != 0, KeyFn, VK_RETURN);
@@ -256,6 +266,7 @@ static signed char ClampMove(int v) { return (signed char)(v > 127 ? 127 : v < -
 // CL_FinishMove(EBX = usercmd): the stick is added to the keyboard's movement first.
 static void __cdecl AddVrMove(BYTE *cmd)
 {
+    VR_OnCreateCmd();
     if (g_moveF == 0 && g_moveR == 0) return;
     cmd[USERCMD_forwardmove] = ClampMove((signed char)cmd[USERCMD_forwardmove] + (int)(g_moveF * 127.0f));
     cmd[USERCMD_rightmove] = ClampMove((signed char)cmd[USERCMD_rightmove] + (int)(g_moveR * 127.0f));

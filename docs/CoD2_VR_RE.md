@@ -154,6 +154,46 @@ weapprev "weaponslot primary" "weaponslot primaryb" +binoculars +holdbreath +sco
   CPU com a pose e o FOV de cada olho; os shaders (compilados com `d3dcompiler_47.dll`) só repassam posição e cor.
   Validado fora do jogo com `proxy/test/overlaytest.c` (o fim da linha cai no pixel calculado).
 
+## Terceira rodada (29/10/2026): arma na mão, tiro, playerState
+
+- **Arma da vista:** `cg_gun_x/y/z` (cvar_t* em `0xf569d4` / `0xf48b58` / `0xf56994`) só são lidos por
+  `CG_AddViewWeapon` (`0x4b6d80`). Ele monta a entidade da arma na pilha (eixos em `+0x14`, origem em `+0x3c`) e chama
+  `0x4b69b0(ps, 0xf78ea8, ?)` com a entidade em **ESI** (chamada em `0x4b6ecc`); essa função lê `+0x14..+0x44` e passa
+  ao renderer (`re+0x4c`/`re+0x50`). O mod envolve a chamada (`hk_AddPlayerWeapon`). No jogo (`demolition`, sem headset,
+  `FakeHand`): a origem que o jogo dá à arma é a própria origem da vista (0, 0, 0): **os modelos de arma do CoD2 têm a
+  origem no olho**, e `cg.refdef` já tem a vista do frame quando a arma é adicionada.
+- **playerState:** o primeiro argumento de `0x4b69b0` é `0xf708e8` (`cg.predictedPlayerState`; o `CG_FireWeapon` também
+  o usa). Origem em `+0x14` (layout do Q3): `vieworg.z - origem.z = 60,0` em pé. `stats` em `+0x10c`
+  (`MSG_ReadDeltaPlayerstate` `0x43d810`, string `PS_STATS`), mas **`stats[0]` não é a vida** (0 275 0 0 com vida cheia).
+- **Tiro:** `CG_FireWeapon` (`0x4b7800`, string de erro em `0x580181`, chamado pelo `CG_EntityEvent` para os
+  `EV_FIRE_WEAPON*`) compara `cent+0xa8` (número da entidade) com `cg.snap` (`0xf5bd28`) `+0xb0` (cliente do jogador).
+  O prólogo `83 ec 10 53 55` (5 bytes) é desviado (`hk_FireWeapon`); validado: a linha `shot:` aparece no log após um
+  `+attack` do `[Debug] TestFire`.
+- Tabela de `0x1b8` bytes por arma em `0xf48d80`, indexada pelo byte de arma da entidade (`cent+0xa2`): provavelmente
+  `cg_weapons`.
+
+## Quarta rodada (29/10/2026, tarde): entidades, dano, armas, telas cheias, morte
+
+Tudo em `proxy/cod2_addresses.h`; o resumo em inglês está em `docs-handoff/ENGINE_DIFFERENCES.md`.
+
+- **`g_entities`** em `0x1b15f00`, `0x1fc` bytes cada (método de script `dodamage` `0x4efaf0`; o atacante padrão do
+  `G_Damage`, `0x1c13b08`, é a entidade 1022). Campos: origem `+0xdc`, cliente `+0xfc`, ator (IA) `+0x100`,
+  `takedamage` `+0x111`, vida `+0x13c`.
+- **`G_Damage`** `0x528050(alvo, causador, atacante, dir*, ponto*, dano, dflags, mod, hitLoc)`; `MOD_MELEE` = 7;
+  hitLoc 2 cabeça, 4 torso. Usado pelo golpe com a arma: funciona no jogo (IA morta por golpes, log do mantenedor).
+- **Definições de arma**: `bg_weaponDefs` `0x1c64548`, quantidade `0x1cbad9c`; tabela de campos `{nome, deslocamento,
+  tipo}`: `weaponType` `+0x78` (0 bala, 1 granada), `cookOffHold` `+0x33c`, `hipSpread*` `+0x28c..+0x2b8`, `adsSpread`
+  `+0x4bc`. As granadas do SP vêm com `cookOffHold 0` (lançadas logo após o pino, segurando ou não); o mod liga 1 em
+  memória. A dispersão sem mirar (M1 Garand 2..8°, +8 andando) passa a ser a de mira (0,2°). Ambos confirmados no jogo.
+- **Tela de morte**: o servidor manda `opendeadscreen <ui_deadquote>` (`0x4e8f19`); o cgame (`0x4a6ad0`) grava
+  `cg.time` (`0xf708dc`) em `0xf7966c` e 0 no `closedeadscreen`. A vida da entidade 0 **não** chega a 0 na morte.
+- `sv_running` (cvar_t* `0x747f04`): fase rodando. `Sys_QueEvent` `0x4500d0` (tempo em EAX, tipo 1 = tecla): o botão
+  Menu precisa dele, as mensagens de janela não chegam sem foco.
+- **Renderer**: `re.DrawStretchPic` = `0x10021560` (x, y, w, h, s0, t0, s1, t1, cor*, material*; nome do material em
+  `+0`). O 2D de um quadro é enfileirado antes do mundo desse quadro; o backend executa o mundo antes do 2D; o 2D converte
+  pixels pelo tamanho do alvo ligado (`0x1003eae0`: só alvos do tamanho da janela servem); os comandos 13/14 esvaziam o lote
+  2D (`RB_EndTessSurface` `0x1003ad10`) antes de trocar de alvo.
+
 ## Ainda não verificado / próximos passos
 
 - **Nada foi testado com headset**: sessão OpenXR, cópia das texturas compartilhadas, layers, poses e controles

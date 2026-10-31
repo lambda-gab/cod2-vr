@@ -51,6 +51,8 @@ typedef HRESULT (STDMETHODCALLTYPE *PFN_Reset)(IDirect3DDevice9 *, D3DPRESENT_PA
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DevPresent)(IDirect3DDevice9 *, const RECT *, const RECT *, HWND, const RGNDATA *);
 typedef HRESULT (STDMETHODCALLTYPE *PFN_ScPresent)(IDirect3DSwapChain9 *, const RECT *, const RECT *, HWND, const RGNDATA *, DWORD);
 typedef HRESULT (STDMETHODCALLTYPE *PFN_CreateDevice)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS *, IDirect3DDevice9 **);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SetRenderState)(IDirect3DDevice9 *, D3DRENDERSTATETYPE, DWORD);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SetViewport)(IDirect3DDevice9 *, const D3DVIEWPORT9 *);
 
 static PFN_CreateTexture       o_CreateTexture;
 static PFN_CreateVolumeTexture o_CreateVolumeTexture;
@@ -61,6 +63,8 @@ static PFN_Reset               o_Reset;
 static PFN_DevPresent          o_DevPresent;
 static PFN_ScPresent           o_ScPresent;
 static PFN_CreateDevice        o_CreateDevice;
+static PFN_SetRenderState      o_SetRenderState;
+static PFN_SetViewport         o_SetViewport;
 static int                     g_convFails;
 
 static DWORD TexUsage(DWORD usage) { return (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) ? usage : usage | D3DUSAGE_DYNAMIC; }
@@ -146,6 +150,45 @@ static HRESULT STDMETHODCALLTYPE hk_ScPresent(IDirect3DSwapChain9 *sc, const REC
     return hr;
 }
 
+// The gun drawn mirrored (a left-handed player's: Proxy_SetMirrorGun). A mirrored model's triangles wind the other way, so
+// while the backend draws the view weapon its cull mode is flipped. The view weapon is what the renderer draws with the depth
+// range 0 .. 0.2 (its RB_SetDepthRange 0x1003ec50, for entities with render flag 0x08 - the first-person weapon - sets the
+// viewport's MaxZ to 0.2 and calls SetViewport), so the viewport tells when that pass starts and ends.
+static int   g_mirrorGun, g_gunPass;
+static DWORD g_cullAsked = D3DCULL_CCW;   // what the renderer last set
+static IDirect3DDevice9 *g_cullDev;
+
+static DWORD FlipCull(DWORD c) { return c == D3DCULL_CW ? D3DCULL_CCW : c == D3DCULL_CCW ? D3DCULL_CW : c; }
+
+static HRESULT STDMETHODCALLTYPE hk_SetRenderState(IDirect3DDevice9 *d, D3DRENDERSTATETYPE s, DWORD v)
+{
+    if (s == D3DRS_CULLMODE) {
+        g_cullAsked = v;
+        g_cullDev = d;
+        if (g_mirrorGun && g_gunPass) v = FlipCull(v);
+    }
+    return o_SetRenderState(d, s, v);
+}
+
+static HRESULT STDMETHODCALLTYPE hk_SetViewport(IDirect3DDevice9 *d, const D3DVIEWPORT9 *vp)
+{
+    int gun = vp && vp->MinZ == 0.0f && vp->MaxZ > 0.15f && vp->MaxZ < 0.25f;
+    HRESULT hr = o_SetViewport(d, vp);
+    g_cullDev = d;
+    if (gun != g_gunPass) {
+        g_gunPass = gun;
+        if (g_mirrorGun) o_SetRenderState(d, D3DRS_CULLMODE, gun ? FlipCull(g_cullAsked) : g_cullAsked);   // the pass's cull, at once
+    }
+    return hr;
+}
+
+void Proxy_SetMirrorGun(int on)
+{
+    if (on == g_mirrorGun) return;
+    g_mirrorGun = on;
+    if (g_gunPass && g_cullDev) o_SetRenderState(g_cullDev, D3DRS_CULLMODE, on ? FlipCull(g_cullAsked) : g_cullAsked);
+}
+
 void Proxy_HookSwapChain(IDirect3DSwapChain9 *sc)
 {
     Patch((void **)&sc->lpVtbl->Present, (void *)hk_ScPresent, (void **)&o_ScPresent);
@@ -162,6 +205,8 @@ static void HookDevice(IDirect3DDevice9Ex *dev)
     Patch((void **)&v->CreateIndexBuffer, (void *)hk_CreateIndexBuffer, (void **)&o_CreateIndexBuffer);
     Patch((void **)&v->Reset, (void *)hk_Reset, (void **)&o_Reset);
     Patch((void **)&v->Present, (void *)hk_DevPresent, (void **)&o_DevPresent);
+    Patch((void **)&v->SetRenderState, (void *)hk_SetRenderState, (void **)&o_SetRenderState);
+    Patch((void **)&v->SetViewport, (void *)hk_SetViewport, (void **)&o_SetViewport);
     // RB_SwapBuffers presents through the swap chain (GetSwapChain(0) -> Present)
     if (SUCCEEDED(IDirect3DDevice9Ex_GetSwapChain(dev, 0, &sc)) && sc) {
         Proxy_HookSwapChain(sc);

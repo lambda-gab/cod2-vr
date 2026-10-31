@@ -1,0 +1,71 @@
+# Builds the mod, the launcher and the installer on Windows and publishes them as a GitHub Release
+# whenever a version tag (v0.2.0, ...) is pushed (as the Call of Duty 1 VR mod's). Can also be run by hand
+# (Actions tab) to just build and download the files.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Get the OpenXR loader
+        shell: pwsh
+        run: |
+          $v = '1.1.65'
+          Invoke-WebRequest "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-$v/openxr_loader_windows-$v.zip" -OutFile oxr.zip
+          Expand-Archive oxr.zip -DestinationPath deps/openxr
+
+      - name: Build the mod, the launcher and the installer
+        shell: cmd
+        run: |
+          call proxy\build.bat || exit /b 1
+          call launcher\build_launcher.bat || exit /b 1
+          call installer\build_setup.bat || exit /b 1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item installer/out/CoD2-VR-Setup.exe dist/
+          Compress-Archive -Path proxy/out/d3d9.dll, proxy/out/openxr_loader.dll, proxy/cod2_vr.ini, launcher/supporters.ini, 'launcher/out/Call of Duty 2 VR.exe' -DestinationPath dist/cod2-vr-manual-install.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod2-vr
+          path: dist/*
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            **Call of Duty 2 VR** for `CoD2SP_s.exe` 1.3 (single player).
+
+            **Install:** download `CoD2-VR-Setup.exe` and run it. It finds the game folder, installs the mod and the
+            launcher (**Call of Duty 2 VR**) and can create a desktop shortcut. Run it again to update or uninstall.
+
+            **Manual install:** extract `cod2-vr-manual-install.zip` into the game folder (where `CoD2SP_s.exe` is).
+
+            Needs a 32-bit OpenXR runtime (Virtual Desktop, Quest Link or the SteamVR beta). See the README for
+            controls, settings and what is new in this version.
+
+            ---
+
+            **Instalação:** baixe o `CoD2-VR-Setup.exe` e execute. Ele acha a pasta do jogo, instala o mod e o launcher
+            (**Call of Duty 2 VR**) e pode criar um atalho na área de trabalho. Execute de novo para atualizar ou
+            desinstalar.
+
+            **Manual:** extraia o `cod2-vr-manual-install.zip` na pasta do jogo (onde fica o `CoD2SP_s.exe`).
+
+            Precisa de um runtime OpenXR de 32 bits (Virtual Desktop, Quest Link ou o SteamVR beta). Veja o README para
+            os controles, as configurações e as novidades desta versão.

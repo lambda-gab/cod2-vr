@@ -31,12 +31,14 @@ static struct {
     ID3D11InputLayout   *layout;
     ID3D11Buffer        *vb;
     ID3D11BlendState    *blend;
+    ID3D11BlendState    *under;     // drawn under what is there: dst + src * (1 - dst alpha)
     ID3D11RasterizerState *raster;
     ID3D11DepthStencilState *depth;
 } ov;
 
 // what to draw this frame: segments (tracking space, XR axes, metres)
-static struct { float a[3], b[3], width, col[4]; } g_seg[64];
+#define MAX_SEGS 128   // the grenade line (up to 70), the crosshair's ring (24), the beam
+static struct { float a[3], b[3], width, col[4]; } g_seg[MAX_SEGS];
 static int   g_nseg;
 static struct { float p[3], size, col[4]; } g_dot[8];
 static int   g_ndot;
@@ -46,7 +48,7 @@ int  Overlay_Empty(void) { return g_nseg == 0 && g_ndot == 0; }
 
 void Overlay_Line(const float a[3], const float b[3], float width, const float rgba[4])
 {
-    if (g_nseg >= 64) return;
+    if (g_nseg >= MAX_SEGS) return;
     memcpy(g_seg[g_nseg].a, a, 12);
     memcpy(g_seg[g_nseg].b, b, 12);
     g_seg[g_nseg].width = width;
@@ -109,13 +111,18 @@ int Overlay_Init(ID3D11Device *dev, ID3D11DeviceContext *ctx)
     bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     ID3D11Device_CreateBlendState(dev, &bl, &ov.blend);
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_INV_DEST_ALPHA;
+    bl.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_INV_DEST_ALPHA;
+    bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    ID3D11Device_CreateBlendState(dev, &bl, &ov.under);
     rs.FillMode = D3D11_FILL_SOLID;
     rs.CullMode = D3D11_CULL_NONE;
     rs.DepthClipEnable = FALSE;
     ID3D11Device_CreateRasterizerState(dev, &rs, &ov.raster);
     ds.DepthEnable = FALSE;
     ID3D11Device_CreateDepthStencilState(dev, &ds, &ov.depth);
-    if (!ov.vs || !ov.ps || !ov.layout || !ov.vb || !ov.blend || !ov.raster || !ov.depth) { Log("overlay: D3D11 objects failed"); return 0; }
+    if (!ov.vs || !ov.ps || !ov.layout || !ov.vb || !ov.blend || !ov.under || !ov.raster || !ov.depth) { Log("overlay: D3D11 objects failed"); return 0; }
     ov.ready = 1;
     ov.failed = 0;
     return 1;
@@ -209,6 +216,133 @@ static int Build(const eye_t *e, vtx_t *o)
         n += Quad(e, c, g_dot[i].col, o + n);
     }
     return n;
+}
+
+static void DrawVertsBlend(ID3D11RenderTargetView *rtv, int w, int h, int n, ID3D11BlendState *blend)
+{
+    D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
+    UINT stride = sizeof(vtx_t), offset = 0;
+    ID3D11DeviceContext_OMSetRenderTargets(ov.ctx, 1, &rtv, NULL);
+    ID3D11DeviceContext_OMSetBlendState(ov.ctx, blend, NULL, 0xffffffff);
+    ID3D11DeviceContext_OMSetDepthStencilState(ov.ctx, ov.depth, 0);
+    ID3D11DeviceContext_RSSetState(ov.ctx, ov.raster);
+    ID3D11DeviceContext_RSSetViewports(ov.ctx, 1, &vp);
+    ID3D11DeviceContext_IASetInputLayout(ov.ctx, ov.layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ov.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(ov.ctx, 0, 1, &ov.vb, &stride, &offset);
+    ID3D11DeviceContext_VSSetShader(ov.ctx, ov.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ov.ctx, ov.ps, NULL, 0);
+    ID3D11DeviceContext_Draw(ov.ctx, n, 0);
+    ID3D11DeviceContext_OMSetRenderTargets(ov.ctx, 0, NULL, NULL);
+}
+
+static void DrawVerts(ID3D11RenderTargetView *rtv, int w, int h, int n) { DrawVertsBlend(rtv, w, h, n, ov.blend); }
+
+// The objectives' panel (as the CoD 1 mod's DrawObjectivesPanel): nearly the whole screen, corners
+// rounded at 4.5 % of its height, premultiplied black of opacity a drawn under the game's text.
+void Overlay_Panel(ID3D11Texture2D *target, DXGI_FORMAT format, int w, int h, float a)
+{
+    D3D11_RENDER_TARGET_VIEW_DESC rd = { 0 };
+    ID3D11RenderTargetView *rtv = NULL;
+    D3D11_MAPPED_SUBRESOURCE map;
+    float x0 = w * 0.005f, x1 = w * 0.995f, y0 = h * 0.01f, y1 = h * 0.99f, r = h * 0.045f;
+    float ring[4 * 9][2], cx, cy;
+    int n = 0, i, c, m = 0;
+    if (!ov.ready || a <= 0.01f || w <= 0 || h <= 0) return;
+    if (a > 1) a = 1;
+    for (c = 0; c < 4; c++) {   // corners counter-clockwise: bottom right, top right, top left, bottom left (pixels, y up)
+        float ccx = (c == 0 || c == 1) ? x1 - r : x0 + r, ccy = (c == 0 || c == 3) ? y0 + r : y1 - r;
+        for (i = 0; i <= 8; i++) {
+            float t = (c * 90.0f - 90.0f + i * (90.0f / 8)) * 0.0174533f;
+            ring[m][0] = ccx + cosf(t) * r;
+            ring[m][1] = ccy + sinf(t) * r;
+            m++;
+        }
+    }
+    cx = (x0 + x1) * 0.5f; cy = (y0 + y1) * 0.5f;
+    rd.Format = format;
+    rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    if (FAILED(ID3D11Device_CreateRenderTargetView(ov.dev, (ID3D11Resource *)target, &rd, &rtv))) return;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ov.ctx, (ID3D11Resource *)ov.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        vtx_t *o = (vtx_t *)map.pData;
+        for (i = 0; i < m; i++) {   // a fan as triangles: centre, this point, the next
+            const float *p[3];
+            int k;
+            float centre[2];
+            centre[0] = cx; centre[1] = cy;
+            p[0] = centre; p[1] = ring[i]; p[2] = ring[(i + 1) % m];
+            for (k = 0; k < 3; k++) {
+                memset(&o[n], 0, sizeof(o[n]));
+                o[n].pos[0] = p[k][0] / w * 2.0f - 1.0f;
+                o[n].pos[1] = p[k][1] / h * 2.0f - 1.0f;
+                o[n].pos[2] = 0.5f; o[n].pos[3] = 1;
+                o[n].col[3] = a;
+                n++;
+            }
+        }
+        ID3D11DeviceContext_Unmap(ov.ctx, (ID3D11Resource *)ov.vb, 0);
+    }
+    if (n > 0) DrawVertsBlend(rtv, w, h, n, ov.under);
+    ID3D11RenderTargetView_Release(rtv);
+}
+
+// The comfort vignette, drawn over an eye's image (not cleared): clear around the eye's own
+// straight-ahead direction (the fovs are asymmetric), a soft edge, black outside. The headset
+// shows about tan 1.0-1.2 to each side; the clear aperture goes from past the edge (amount 0) to
+// tan 0.3 (~17 degrees, amount 1).
+void Overlay_Vignette(ID3D11Texture2D *target, DXGI_FORMAT format, int w, int h, const XrFovf *fov, float amount, float fade)
+{
+    D3D11_RENDER_TARGET_VIEW_DESC rd = { 0 };
+    ID3D11RenderTargetView *rtv = NULL;
+    D3D11_MAPPED_SUBRESOURCE map;
+    float l = tanf(fov->angleLeft), r = tanf(fov->angleRight), u = tanf(fov->angleUp), d = tanf(fov->angleDown);
+    float sx, sy, cx, cy, rad[3];
+    int n = 0, i, k;
+    if (!ov.ready || (amount <= 0.002f && fade <= 0.002f) || r - l < 1e-3f || u - d < 1e-3f) return;
+    if (amount > 1) amount = 1;
+    if (fade > 1) fade = 1;
+    sx = 2.0f / (r - l); sy = 2.0f / (u - d);           // clip units per unit of tangent
+    cx = -(r + l) / (r - l); cy = -(u + d) / (u - d);   // straight ahead in clip space
+    rad[0] = 1.25f + (0.30f - 1.25f) * amount;           // clear aperture, tangent units
+    rad[1] = rad[0] * 1.35f + 0.08f;                     // end of the soft edge
+    rad[2] = 10.0f;                                      // past every corner
+    rd.Format = format;
+    rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    if (FAILED(ID3D11Device_CreateRenderTargetView(ov.dev, (ID3D11Resource *)target, &rd, &rtv))) return;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ov.ctx, (ID3D11Resource *)ov.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        vtx_t *o = (vtx_t *)map.pData;
+        if (fade > 0.002f) {
+            // the whole eye darkened (two triangles over clip space)
+            static const float corner[6][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, -1 }, { 1, 1 }, { -1, 1 } };
+            for (i = 0; i < 6; i++) {
+                memset(&o[n], 0, sizeof(o[n]));
+                o[n].pos[0] = corner[i][0]; o[n].pos[1] = corner[i][1]; o[n].pos[2] = 0.5f; o[n].pos[3] = 1;
+                o[n].col[3] = fade;
+                n++;
+            }
+        }
+        for (k = 0; k < 2 && amount > 0.002f; k++)
+            for (i = 0; i < 48 && n + 6 <= MAX_VERTS; i++) {
+                float t0 = i * (6.2831853f / 48), t1 = (i + 1) * (6.2831853f / 48), c[4][2];
+                float a0 = k == 0 ? 0.0f : 1.0f;   // premultiplied black: colour 0, alpha a
+                vtx_t q[4];
+                int j;
+                c[0][0] = cx + cosf(t0) * rad[k] * sx;     c[0][1] = cy + sinf(t0) * rad[k] * sy;
+                c[1][0] = cx + cosf(t1) * rad[k] * sx;     c[1][1] = cy + sinf(t1) * rad[k] * sy;
+                c[2][0] = cx + cosf(t1) * rad[k + 1] * sx; c[2][1] = cy + sinf(t1) * rad[k + 1] * sy;
+                c[3][0] = cx + cosf(t0) * rad[k + 1] * sx; c[3][1] = cy + sinf(t0) * rad[k + 1] * sy;
+                for (j = 0; j < 4; j++) {
+                    memset(&q[j], 0, sizeof(q[j]));
+                    q[j].pos[0] = c[j][0]; q[j].pos[1] = c[j][1]; q[j].pos[2] = 0.5f; q[j].pos[3] = 1;
+                    q[j].col[3] = j < 2 ? a0 : 1.0f;
+                }
+                o[n++] = q[0]; o[n++] = q[1]; o[n++] = q[2];
+                o[n++] = q[0]; o[n++] = q[2]; o[n++] = q[3];
+            }
+        ID3D11DeviceContext_Unmap(ov.ctx, (ID3D11Resource *)ov.vb, 0);
+    }
+    if (n > 0) DrawVerts(rtv, w, h, n);
+    ID3D11RenderTargetView_Release(rtv);
 }
 
 void Overlay_Draw(ID3D11Texture2D *target, DXGI_FORMAT format, int w, int h, const XrPosef *pose, const XrFovf *fov)

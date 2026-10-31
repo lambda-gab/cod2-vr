@@ -438,7 +438,7 @@ static void GameFiles(const char *dir)
     FileInfo(dir, "d3d9.dll", 1);
     FileInfo(dir, "openxr_loader.dll", 1);
     FileInfo(dir, "cod2_vr.ini", 0);
-    FileInfo(dir, "CoD2-VR-Launcher.exe", 1);
+    FileInfo(dir, "Call of Duty 2 VR.exe", 1);
     FileInfo(dir, "steam_api.dll", 0);
     FileInfo(dir, "main\\pakz_vr_text.pk3", 0);
     _snprintf(path, sizeof(path), "%s\\d3d9.dll", dir);

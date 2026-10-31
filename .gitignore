@@ -16,3 +16,12 @@ deps/
 
 # local release files
 dist/
+
+# never commit game data (the arms pack is made from the player's own files)
+*.iwd
+
+# local maintainer notes (handoff between sessions)
+docs-handoff/
+
+# Python caches
+__pycache__/

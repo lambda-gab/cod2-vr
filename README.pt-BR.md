@@ -156,6 +156,13 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.3
+
+- **Fechamento ao iniciar em alguns PCs (versão Steam, overlays):** toda a apresentação do quadro, com o overlay da
+  Steam e qualquer outro overlay junto, agora roda na pilha grande do mod em vez da pilha minúscula do jogo.
+- **Registro de crash no log:** se o jogo ainda fechar, o `cod2_vr.log` agora diz onde (o módulo e o erro), e o
+  relatório de diagnóstico mostra a causa.
+
 ### v1.0.2
 
 - **SteamVR, segunda correção do fechamento ao iniciar:** as threads que o runtime do SteamVR cria dentro do jogo

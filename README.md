@@ -153,6 +153,13 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.3
+
+- **Crash at start on some PCs (Steam version, overlays):** the whole frame presentation, with the Steam overlay and
+  any other overlay hooked into it, now runs on the mod's own big stack instead of the game's tiny one.
+- **Crash report in the log:** if the game still closes, `cod2_vr.log` now says where (the module and the error), so
+  a diagnostic report shows the cause.
+
 ### v1.0.2
 
 - **SteamVR, second fix for the crash at start:** the threads the SteamVR runtime makes inside the game got the

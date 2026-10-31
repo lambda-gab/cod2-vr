@@ -21,6 +21,7 @@ void VR_DeviceCreated(IDirect3DDevice9Ex *dev, const D3DPRESENT_PARAMETERS *pp);
 void VR_DeviceReset(const D3DPRESENT_PARAMETERS *pp);   // after a successful Reset
 void VR_BeforePresent(void);    // the frame is complete in the back buffer's place
 void VR_AfterPresent(void);
+void VR_RunOnBigStack(void (*work)(void));   // work on the mod's 4 MB stack (the game's threads have 64 KB)
 void VR_OnCreateCmd(void);       // controls.c: a usercmd is being made (CL_FinishMove)
 void VR_Command(const char *cmd);   // controls.c: a "vr:" button command was pressed (recenter, vignette)
 void Proxy_SetMirrorGun(int on);   // d3d9_proxy.c: the view weapon is drawn mirrored this frame (its cull mode flipped)

@@ -1829,6 +1829,39 @@ static HANDLE WINAPI hk_CreateRemoteThreadEx(HANDLE proc, LPSECURITY_ATTRIBUTES 
     return o_CreateRemoteThreadEx(proc, sa, size, start, arg, flags, attrs, id);
 }
 
+// Crash report in the log (players' crashes without a debugger): the first faults of the process (a stack overflow, an
+// access violation, an illegal instruction...) are written with the module and offset where they happened and the stack
+// left, before Windows ends the game. First-chance: a fault the mod's own __try catches is logged too (rare). Static
+// buffers, little stack: a stack overflow leaves almost none.
+static char  g_crashLine[512];
+static LONG  g_crashCount;
+
+static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS *ep)
+{
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    void *at = ep->ExceptionRecord->ExceptionAddress;
+    static char mod[MAX_PATH];
+    HMODULE m = NULL;
+    const char *name;
+    NT_TIB *tib;
+    if (code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_PRIV_INSTRUCTION && code != 0xc0000409)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedIncrement(&g_crashCount) > 8) return EXCEPTION_CONTINUE_SEARCH;
+    mod[0] = 0;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)at, &m) && m)
+        GetModuleFileNameA(m, mod, sizeof(mod));
+    name = strrchr(mod, '\\') ? strrchr(mod, '\\') + 1 : mod[0] ? mod : "?";
+    tib = (NT_TIB *)NtCurrentTeb();
+    _snprintf(g_crashLine, sizeof(g_crashLine) - 1, "fault %08lx at %p (%s+%lx), thread %lu, stack %lu KB used, eip %08lx esp %08lx%s",
+              code, at, name, m ? (unsigned long)((BYTE *)at - (BYTE *)m) : 0ul, GetCurrentThreadId(),
+              (unsigned long)(((BYTE *)tib->StackBase - (BYTE *)ep->ContextRecord->Esp) / 1024), ep->ContextRecord->Eip,
+              ep->ContextRecord->Esp, code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2 ? "" : "");
+    g_crashLine[sizeof(g_crashLine) - 1] = 0;
+    Log("%s", g_crashLine);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static void InstallThreadStackHook(void)
 {
     static int done;
@@ -1837,6 +1870,7 @@ static void InstallThreadStackHook(void)
     DWORD old;
     if (done) return;
     done = 1;
+    AddVectoredExceptionHandler(1, CrashLogger);
     p = kb ? (BYTE *)GetProcAddress(kb, "CreateRemoteThreadEx") : NULL;
     if (!p || p[0] != 0x68) { Log("threads: CreateRemoteThreadEx not as expected, thread stacks left as they are"); return; }
     tramp = (BYTE *)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -3119,6 +3153,7 @@ static void AfterPresentWork(void)
 
 void VR_BeforePresent(void) { RunOnBigStack(BeforePresentWork); }
 void VR_AfterPresent(void) { RunOnBigStack(AfterPresentWork); }
+void VR_RunOnBigStack(void (*work)(void)) { RunOnBigStack(work); }
 
 // ---------------------------------------------------------------------------
 // Hooks

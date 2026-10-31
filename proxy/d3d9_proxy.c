@@ -132,22 +132,36 @@ static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *d, D3DPRESENT_PARAME
     return hr;
 }
 
+// The whole present runs on the mod's big stack (VR_RunOnBigStack): the mod's frame work, and the game's present with the
+// driver and whatever else hooks it (the Steam overlay, recording and FPS overlays). The game's threads have 64 KB of stack.
+static struct { IDirect3DDevice9 *d; IDirect3DSwapChain9 *sc; const RECT *s, *dst; HWND w; const RGNDATA *r; DWORD f; HRESULT hr; } g_pr;
+
+static void DevPresentWork(void)
+{
+    VR_BeforePresent();
+    g_pr.hr = o_DevPresent(g_pr.d, g_pr.s, g_pr.dst, g_pr.w, g_pr.r);
+    VR_AfterPresent();
+}
+
+static void ScPresentWork(void)
+{
+    VR_BeforePresent();
+    g_pr.hr = o_ScPresent(g_pr.sc, g_pr.s, g_pr.dst, g_pr.w, g_pr.r, g_pr.f);
+    VR_AfterPresent();
+}
+
 static HRESULT STDMETHODCALLTYPE hk_DevPresent(IDirect3DDevice9 *d, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r)
 {
-    HRESULT hr;
-    VR_BeforePresent();
-    hr = o_DevPresent(d, s, dst, w, r);
-    VR_AfterPresent();
-    return hr;
+    g_pr.d = d; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r;
+    VR_RunOnBigStack(DevPresentWork);
+    return g_pr.hr;
 }
 
 static HRESULT STDMETHODCALLTYPE hk_ScPresent(IDirect3DSwapChain9 *sc, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r, DWORD f)
 {
-    HRESULT hr;
-    VR_BeforePresent();
-    hr = o_ScPresent(sc, s, dst, w, r, f);
-    VR_AfterPresent();
-    return hr;
+    g_pr.sc = sc; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r; g_pr.f = f;
+    VR_RunOnBigStack(ScPresentWork);
+    return g_pr.hr;
 }
 
 // The gun drawn mirrored (a left-handed player's: Proxy_SetMirrorGun). A mirrored model's triangles wind the other way, so

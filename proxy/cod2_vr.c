@@ -59,6 +59,7 @@ static struct {
     float converge;      // metres along the barrel where the crosshair is drawn (the shots follow the barrel's line)
     int   fireFromGun;   // [Controllers] FireFromGun: 1 = the player's shots leave the muzzle along the barrel (VR)
     float muzzleDist;    // [Controllers] MuzzleDistance: metres from the controller to the muzzle along the barrel
+    float sightReach;    // [Controllers] SightReach: an eye this near the barrel's line (metres) aims through the sights
     float wofs[3];       // the spot of the flat game's gun (units from the eye: forward, right, up) that goes into the hand
     float wPitch, wYaw;  // gun angle relative to the controller, degrees (barrel up, to the left)
     int   physCrouch;    // 1 = crouching for real crouches the soldier
@@ -298,6 +299,7 @@ static void LoadConfig(void)
     cfg.converge     = GetFloat("Controllers", "ConvergeDistance", 15.0f);
     cfg.fireFromGun  = GetInt("Controllers", "FireFromGun", 1);
     cfg.muzzleDist   = GetFloat("Controllers", "MuzzleDistance", 0.45f);
+    cfg.sightReach   = GetFloat("Controllers", "SightReach", 0.15f);
     cfg.physCrouch   = GetInt("Controllers", "PhysicalCrouch", 1);
     cfg.crouchDepth  = GetFloat("Controllers", "CrouchDepth", 0.32f);
     cfg.vignette     = GetInt("Comfort", "Vignette", 1);
@@ -1279,6 +1281,38 @@ static __declspec(naked) void hk_StringEdGetString(void)
 // hit it half a metre off). In VR ([Controllers] FireFromGun 1) the bullet starts at the muzzle (MuzzleDistance metres
 // along the controller's barrel line) and goes along the barrel, the spread around it; the muzzle is never past a wall
 // (the line from the eye to it is traced first). The crosshair stays on that line (ConvergeDistance ahead).
+// Where the shot's line starts (tracking space), along the barrel's direction. Aiming through the sights, your eye is on
+// the sight line, a few centimetres above the bore (as with a real gun): the shots then follow the line through that eye
+// (they hit what the sights cover, not a little below). The other times (from the hip) they follow the bore, from the
+// muzzle. The eye counts as aiming when it is within SightReach of the barrel's line, ahead of the grip; the nearer eye
+// (the one you aim with) is taken. The crosshair is drawn on the same line.
+static float g_crossHitW[3];   // where the crosshair was drawn last, in the world (the shot log compares)
+static int   g_crossHitOk;
+
+static void ShotOrigin(const vr_pose_t *gun, float out[3])
+{
+    float m[3], best = 1e9f;
+    int i, k, pick = -1;
+    for (i = 0; i < 3; i++) m[i] = gun->pos[i] + gun->axis[0][i] * cfg.muzzleDist;
+    for (k = 0; k < 2; k++) {
+        float r[3], along, perp[3], d;
+        for (i = 0; i < 3; i++) r[i] = g_eyes[k].pos[i] - gun->pos[i];
+        along = Dot(r, gun->axis[0]);
+        if (along > 0.05f) continue;   // the eye is behind the grip when aiming: not past it
+        for (i = 0; i < 3; i++) perp[i] = r[i] - gun->axis[0][i] * along;
+        d = sqrtf(Dot(perp, perp));
+        if (d < best) { best = d; pick = k; }
+    }
+    if (pick < 0 || best > cfg.sightReach) { memcpy(out, m, 12); return; }
+    {
+        // on the sight line (through the eye, along the barrel), level with the muzzle
+        float r[3], along;
+        for (i = 0; i < 3; i++) r[i] = m[i] - g_eyes[pick].pos[i];
+        along = Dot(r, gun->axis[0]);
+        for (i = 0; i < 3; i++) out[i] = g_eyes[pick].pos[i] + gun->axis[0][i] * along;
+    }
+}
+
 static void __cdecl VR_BulletFromGun(BYTE *wp, BYTE *attacker)
 {
     vr_pose_t gun;
@@ -1286,7 +1320,7 @@ static void __cdecl VR_BulletFromGun(BYTE *wp, BYTE *attacker)
     int i;
     if (g_mode != MODE_VR || !cfg.fireFromGun || attacker != (BYTE *)ADDR_g_entities || !wp || !g_lastWorld || !GunPose(&gun)) return;
     body = BodyYaw(g_lastViewFwd);
-    for (i = 0; i < 3; i++) p[i] = gun.pos[i] + gun.axis[0][i] * cfg.muzzleDist;
+    ShotOrigin(&gun, p);
     TrackingToWorld(p, g_lastViewOrg, body, m);
     memcpy(eye, wp + 0x24, 12);
     f = WorldTrace(eye, m, 0, MASK_SHOT, NULL, NULL);
@@ -1301,11 +1335,17 @@ static void __cdecl VR_BulletFromGun(BYTE *wp, BYTE *attacker)
     memcpy(wp + 0x18, up, 12);
     memcpy(wp + 0x24, m, 12);
     {
+        // the first shots: where the line meets the world (no spread), against where the crosshair was drawn
         static int logged;
-        if (logged < 3) {
+        if (logged < 12) {
+            float end[3], hit[3], fr;
             logged++;
-            Log("shot: from the muzzle %.0f %.0f %.0f (the eye %.0f %.0f %.0f), along the barrel %.2f %.2f %.2f", m[0], m[1], m[2],
-                eye[0], eye[1], eye[2], fwd[0], fwd[1], fwd[2]);
+            for (i = 0; i < 3; i++) end[i] = m[i] + fwd[i] * 8192.0f;
+            fr = WorldTrace(m, end, 0, MASK_SHOT, NULL, NULL);
+            for (i = 0; i < 3; i++) hit[i] = m[i] + fwd[i] * 8192.0f * fr;
+            Log("shot: from %.1f %.1f %.1f (the game's eye %.1f %.1f %.1f, the view %.1f %.1f %.1f) along %.3f %.3f %.3f: hits %.1f %.1f %.1f; "
+                "crosshair %s %.1f %.1f %.1f", m[0], m[1], m[2], eye[0], eye[1], eye[2], g_lastViewOrg[0], g_lastViewOrg[1], g_lastViewOrg[2],
+                fwd[0], fwd[1], fwd[2], hit[0], hit[1], hit[2], g_crossHitOk ? "at" : "(none)", g_crossHitW[0], g_crossHitW[1], g_crossHitW[2]);
         }
     }
 }
@@ -1964,26 +2004,31 @@ static void UpdateCrosshair(void)
 {
     float col[4];   // premultiplied: [Controllers] CrosshairColor, CrosshairOpacity
     vr_pose_t gun;
-    float c[3], right[3], dist = cfg.converge;
+    float c[3], right[3], o[3], dist = cfg.converge, seen[3];
     int i;
     if (!cfg.crosshair || !g_lastWorld || MenuActive() || !GunPose(&gun)) return;
     for (i = 0; i < 3; i++) col[i] = cfg.crossColor[i] * cfg.crossAlpha;
     col[3] = cfg.crossAlpha;
+    memcpy(o, gun.pos, 12);
     if (g_mode == MODE_VR && cfg.fireFromGun && InLevel()) {
-        float body = BodyYaw(g_lastViewFwd), m[3], fwd[3], end[3], p[3], f;
+        float body = BodyYaw(g_lastViewFwd), m[3], fwd[3], end[3], f;
         const float range = 150.0f;   // metres
-        for (i = 0; i < 3; i++) p[i] = gun.pos[i] + gun.axis[0][i] * cfg.muzzleDist;
-        TrackingToWorld(p, g_lastViewOrg, body, m);
+        ShotOrigin(&gun, o);          // the shots' line (the sight line or the bore)
+        TrackingToWorld(o, g_lastViewOrg, body, m);
         RotateZ(gun.axis[0], body, fwd);
         for (i = 0; i < 3; i++) end[i] = m[i] + fwd[i] * range * cfg.worldScale;
         f = WorldTrace(m, end, 0, MASK_SHOT, NULL, NULL);
-        dist = cfg.muzzleDist + (f > 0 && f <= 1 ? f : 1.0f) * range;
+        dist = (f > 0 && f <= 1 ? f : 1.0f) * range;
+        for (i = 0; i < 3; i++) g_crossHitW[i] = m[i] + (end[i] - m[i]) * (f > 0 && f <= 1 ? f : 1.0f);
+        g_crossHitOk = 1;
     }
     for (i = 0; i < 3; i++) {
-        c[i] = gun.pos[i] + gun.axis[0][i] * dist;
+        c[i] = o[i] + gun.axis[0][i] * dist;
         right[i] = -gun.axis[1][i];
+        seen[i] = c[i] - g_head.pos[i];
     }
-    XR_SetReticle(cfg.crosshair, c, right, gun.axis[2], dist * tanf(RAD(cfg.crossSize * 0.5f)), col);
+    // its size an angle as seen from the head
+    XR_SetReticle(cfg.crosshair, c, right, gun.axis[2], sqrtf(Dot(seen, seen)) * tanf(RAD(cfg.crossSize * 0.5f)), col);
 }
 
 // ---------------------------------------------------------------------------
@@ -2858,12 +2903,44 @@ static void InsetHud(void)
     IDirect3DDevice9Ex_StretchRect(g_dev, g_hudCopy, NULL, g_hudSurf, &r, D3DTEXF_LINEAR);
 }
 
-void VR_BeforePresent(void)
+// The mod's frame work runs on a stack of its own. CoD2SP_s.exe asks Windows for 64 KB of stack per thread (its header),
+// and the game is already deep in its own calls when it presents a frame: the SteamVR runtime (its xrWaitFrame, IPC) ran
+// out of that stack and the game closed (exception c00000fd, stack overflow), where Virtual Desktop's runtime fitted.
+// A fiber with 4 MB is switched to for the work and back (the same thread: D3D9, D3D11 and OpenXR see no difference).
+static LPVOID g_gameFiber, g_workFiber;
+static void (*g_fiberWork)(void);
+static int g_fiberFailed;
+
+static void CALLBACK WorkFiber(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {
+        g_fiberWork();
+        SwitchToFiber(g_gameFiber);
+    }
+}
+
+static void RunOnBigStack(void (*work)(void))
+{
+    if (!g_workFiber && !g_fiberFailed) {
+        g_gameFiber = ConvertThreadToFiberEx(NULL, FIBER_FLAG_FLOAT_SWITCH);
+        if (!g_gameFiber && GetLastError() == ERROR_ALREADY_FIBER) g_gameFiber = GetCurrentFiber();
+        if (g_gameFiber) g_workFiber = CreateFiberEx(0, 4 << 20, FIBER_FLAG_FLOAT_SWITCH, WorkFiber, NULL);
+        if (!g_workFiber) { g_fiberFailed = 1; Log("stack: no fiber for the frame work (%lu), on the game's stack", GetLastError()); }
+        else Log("stack: the frame work runs on a 4 MB stack of its own (the game's threads have 64 KB)");
+    }
+    if (!g_workFiber || GetCurrentFiber() != g_gameFiber) { work(); return; }   // another thread, or already on it
+    g_fiberWork = work;
+    SwitchToFiber(g_workFiber);
+}
+
+static void BeforePresentWork(void)
 {
     vr_hud_t hud;
     vr_pose_t objPose;
     int objPosed;
     if (!g_hooked) return;
+    XR_FlushHaptics();
     g_lastWorld = g_worldThisFrame;
     if (g_beTarget != TGT_WINDOW) BE_SetTarget(TGT_WINDOW);
     if (g_mode == MODE_VR && g_probeEyes) ProbeEye();
@@ -2955,7 +3032,7 @@ static void ScreenPressFrame(void)
     g_screenPressAt = 0;
 }
 
-void VR_AfterPresent(void)
+static void AfterPresentWork(void)
 {
     static int logged;
     if (!g_hooked) return;
@@ -2993,6 +3070,9 @@ void VR_AfterPresent(void)
         if (g_vrFrame && !logged) { logged = 1; Log("VR: first headset frame"); }
     }
 }
+
+void VR_BeforePresent(void) { RunOnBigStack(BeforePresentWork); }
+void VR_AfterPresent(void) { RunOnBigStack(AfterPresentWork); }
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -3133,7 +3213,7 @@ void VR_DeviceCreated(IDirect3DDevice9Ex *dev, const D3DPRESENT_PARAMETERS *pp)
     memset(g_eyeMS, 0, sizeof(g_eyeMS)); memset(g_eyeMSDepth, 0, sizeof(g_eyeMSDepth));
     g_hudTex = NULL; g_hudSurf = NULL; g_fullTex = NULL; g_fullSurf = NULL; g_hudCopy = NULL;
     ReleaseTargets();
-    if (XR_Ready()) XR_Shutdown();
+    if (XR_Ready()) RunOnBigStack(XR_Shutdown);
     g_beTarget = TGT_WINDOW;
     g_bePass = 0;
     g_hooked = InstallHooks();

@@ -1194,7 +1194,9 @@ void XR_KeepAlive(int on, const vr_hud_t *hud)
     static int logged;
     if (!g_kaThread) {
         InitializeCriticalSection(&g_kaLock);
-        g_kaThread = CreateThread(NULL, 0, KeepAliveThread, NULL, 0, NULL);
+        // its own 1 MB stack: a thread made with the default gets the game's, 64 KB (CoD2SP_s.exe's header), and the
+        // SteamVR runtime overflowed such a stack (exception c00000fd)
+        g_kaThread = CreateThread(NULL, 1 << 20, KeepAliveThread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
         if (!g_kaThread) return;
     }
     if (on) {
@@ -1213,17 +1215,33 @@ void XR_KeepAlive(int on, const vr_hud_t *hud)
 
 int XR_KeepAlivePresses(void) { return (int)InterlockedExchange(&g_kaPresses, 0); }
 
+// Vibrations are asked for from the game's own code (a shot, a hit) on its small stack: they are kept here and given to
+// the runtime by XR_FlushHaptics, from the mod's frame work (on its big stack). The strongest of a frame wins.
+static struct { float amplitude; int ms; } g_hapPending[2];
+
 void XR_Haptic(int hand, float amplitude, int ms)
 {
-    XrHapticVibration vib = { XR_TYPE_HAPTIC_VIBRATION };
-    XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
-    if (!xr.session || !xr.aHaptic || !xrApplyHapticFeedback || hand < 0 || hand > 1 || amplitude <= 0) return;
-    vib.duration = (XrDuration)ms * 1000000;
-    vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-    vib.amplitude = amplitude > 1 ? 1 : amplitude;
-    hi.action = xr.aHaptic;
-    hi.subactionPath = xr.handPath[hand];
-    xrApplyHapticFeedback(xr.session, &hi, (const XrHapticBaseHeader *)&vib);
+    if (hand < 0 || hand > 1 || amplitude <= 0) return;
+    if (amplitude > g_hapPending[hand].amplitude) { g_hapPending[hand].amplitude = amplitude; g_hapPending[hand].ms = ms; }
+}
+
+void XR_FlushHaptics(void)
+{
+    int hand;
+    for (hand = 0; hand < 2; hand++) {
+        XrHapticVibration vib = { XR_TYPE_HAPTIC_VIBRATION };
+        XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
+        float amplitude = g_hapPending[hand].amplitude;
+        int ms = g_hapPending[hand].ms;
+        g_hapPending[hand].amplitude = 0;
+        if (amplitude <= 0 || !xr.session || !xr.aHaptic || !xrApplyHapticFeedback) continue;
+        vib.duration = (XrDuration)ms * 1000000;
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = amplitude > 1 ? 1 : amplitude;
+        hi.action = xr.aHaptic;
+        hi.subactionPath = xr.handPath[hand];
+        xrApplyHapticFeedback(xr.session, &hi, (const XrHapticBaseHeader *)&vib);
+    }
 }
 
 static float GetFloat(XrAction a, int hand)

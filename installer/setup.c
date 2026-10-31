@@ -293,7 +293,7 @@ static int Silent(const wchar_t *cmd)
 // The setup window (as the Call of Duty 1 VR mod's v1.8.0 setup): one dark window in the launcher's colours (a welcome
 // page, the progress, the end), drawn by hand.
 // ---------------------------------------------------------------------------
-#define SETUP_VERSION L"v1.0.0"   // the launcher's VERSION_TEXT
+#define SETUP_VERSION L"v1.0.1"   // the launcher's VERSION_TEXT
 #define BASE_W 640
 #define BASE_H 420
 

@@ -24,7 +24,7 @@
 #define STB_DXT_IMPLEMENTATION
 #include "../third_party/stb/stb_dxt.h"
 
-#define VERSION_TEXT L"v1.0.0"
+#define VERSION_TEXT L"v1.0.1"
 #define URL_GITHUB   "https://github.com/lambda-gab/cod2-vr"
 #define URL_DISCORD  "https://discord.gg/SRsK2x5Tn"
 #define URL_RELEASES "https://github.com/lambda-gab/cod2-vr/releases/latest"

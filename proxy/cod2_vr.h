@@ -78,6 +78,7 @@ int    XR_FrameOpen(void);
 // While the game loads (a frame every few seconds): on = a thread of the backend submits frames with 'hud'
 // (its screens only, as they were) until called with off, which returns once that thread has stopped.
 void   XR_KeepAlive(int on, const vr_hud_t *hud);
+void   XR_FlushHaptics(void);      // the vibrations asked for since the last call go to the runtime
 int    XR_KeepAlivePresses(void);   // trigger / A presses on a screen without world or menu since the last call
 void   XR_PollScreenPress(void);    // ... read on the game's thread (its frame open, the keep-alive thread stopped)
 void   XR_ScreenPressReset(void);   // the game's own controls run again: forget the state

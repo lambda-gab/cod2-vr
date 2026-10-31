@@ -156,6 +156,13 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.1
+
+- **O SteamVR não fecha mais o jogo ao iniciar** (Valve Index e outros headsets do SteamVR): o jogo dá a cada thread uma
+  pilha muito pequena e o runtime do SteamVR estourava. O trabalho de VR agora roda numa pilha própria.
+- **Os tiros acertam a mira**: a mira fica onde a linha do tiro encontra o mundo, em qualquer distância, e com a arma
+  perto do olho o tiro segue a linha do seu olho ao longo da arma.
+
 ### v1.0.0
 
 O primeiro release.

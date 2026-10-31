@@ -153,6 +153,13 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.1
+
+- **SteamVR no longer crashes the game at start** (Valve Index and other SteamVR headsets): the game gives each thread
+  a very small stack and the SteamVR runtime ran out of it. The VR work now runs on a stack of its own.
+- **The shots hit the crosshair**: the crosshair sits where the shots' line meets the world, at any distance, and
+  with the gun held up to your eye the shots follow your eye's line along the gun.
+
 ### v1.0.0
 
 The first release.

@@ -153,6 +153,11 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.2
+
+- **SteamVR, second fix for the crash at start:** the threads the SteamVR runtime makes inside the game got the
+  game's tiny default stack too. Every new thread of the game now gets at least 1 MB.
+
 ### v1.0.1
 
 - **SteamVR no longer crashes the game at start** (Valve Index and other SteamVR headsets): the game gives each thread

@@ -8,8 +8,8 @@ IDR_LAUNCHER      RCDATA "..\\launcher\\out\\Call of Duty 2 VR.exe"
 IDR_SUPPORTERS    RCDATA "..\\launcher\\supporters.ini"
 
 1 VERSIONINFO
-FILEVERSION 1,0,1,0
-PRODUCTVERSION 1,0,1,0
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -17,8 +17,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "Call of Duty 2 VR setup"
       VALUE "ProductName", "Call of Duty 2 VR"
-      VALUE "FileVersion", "1.0.1"
-      VALUE "ProductVersion", "1.0.1"
+      VALUE "FileVersion", "1.0.2"
+      VALUE "ProductVersion", "1.0.2"
     END
   END
   BLOCK "VarFileInfo"

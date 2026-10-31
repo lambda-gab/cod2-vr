@@ -1808,12 +1808,58 @@ static void __cdecl hk_EndFrame(void)
 // ---------------------------------------------------------------------------
 // Present: submit, mirror, start the next headset frame
 // ---------------------------------------------------------------------------
+// Threads made in the game's process with the default stack size get the size in CoD2SP_s.exe's header: 64 KB. The
+// SteamVR runtime makes its own threads that way and overflowed them as soon as the VR session started (exception
+// c00000fd; Virtual Desktop's runtime fits). Every thread of this process made after VR starts gets at least 1 MB of
+// stack: kernelbase's CreateRemoteThreadEx (which CreateThread, _beginthreadex and std::thread all end in) goes
+// through hk_CreateRemoteThreadEx. Its first instruction (push imm32, 5 bytes) is moved to a trampoline.
+typedef HANDLE (WINAPI *PFN_CreateRemoteThreadEx)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD,
+                                                 LPPROC_THREAD_ATTRIBUTE_LIST, LPDWORD);
+static PFN_CreateRemoteThreadEx o_CreateRemoteThreadEx;
+#define MIN_THREAD_STACK (1 << 20)
+
+static HANDLE WINAPI hk_CreateRemoteThreadEx(HANDLE proc, LPSECURITY_ATTRIBUTES sa, SIZE_T size, LPTHREAD_START_ROUTINE start, LPVOID arg,
+                                             DWORD flags, LPPROC_THREAD_ATTRIBUTE_LIST attrs, LPDWORD id)
+{
+    if ((proc == GetCurrentProcess() || GetProcessId(proc) == GetCurrentProcessId()) && size < MIN_THREAD_STACK) {
+        // 0, or a small commit or reserve: a 1 MB reservation (the commit stays the default, it grows as needed)
+        size = MIN_THREAD_STACK;
+        flags |= STACK_SIZE_PARAM_IS_A_RESERVATION;
+    }
+    return o_CreateRemoteThreadEx(proc, sa, size, start, arg, flags, attrs, id);
+}
+
+static void InstallThreadStackHook(void)
+{
+    static int done;
+    HMODULE kb = GetModuleHandleA("kernelbase.dll");
+    BYTE *p, *tramp;
+    DWORD old;
+    if (done) return;
+    done = 1;
+    p = kb ? (BYTE *)GetProcAddress(kb, "CreateRemoteThreadEx") : NULL;
+    if (!p || p[0] != 0x68) { Log("threads: CreateRemoteThreadEx not as expected, thread stacks left as they are"); return; }
+    tramp = (BYTE *)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return;
+    memcpy(tramp, p, 5);                                   // push imm32
+    tramp[5] = 0xE9;                                       // jmp back after it
+    MEM(DWORD, tramp + 6) = (DWORD)(p + 5) - ((DWORD)tramp + 10);
+    o_CreateRemoteThreadEx = (PFN_CreateRemoteThreadEx)tramp;
+    VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
+    p[0] = 0xE9;
+    MEM(DWORD, p + 1) = (DWORD)hk_CreateRemoteThreadEx - ((DWORD)p + 5);
+    VirtualProtect(p, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    Log("threads: new threads get at least 1 MB of stack (the game's default is 64 KB)");
+}
+
 static void StartVR(void)
 {
     LUID luid = { 0 };
     if (cfg.fakeHmd) { if (g_targetsVR != 2) CreateTargets(2); return; }
     if (!cfg.vr || XR_Ready() || !g_d3d || (int)(GetTickCount() - g_nextXrTry) < 0) return;
     g_nextXrTry = GetTickCount() + 2000;
+    InstallThreadStackHook();   // before the runtime is loaded: its threads need more than the game's 64 KB
     IDirect3D9Ex_GetAdapterLUID(g_d3d, g_adapter, &luid);
     if (!XR_Init(luid, g_winW, g_winH)) return;
     if (!CreateTargets(1)) { Log("VR: could not open the headset textures, side by side instead"); XR_Shutdown(); cfg.vr = 0; CreateTargets(0); return; }

@@ -156,6 +156,11 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.2
+
+- **SteamVR, segunda correção do fechamento ao iniciar:** as threads que o runtime do SteamVR cria dentro do jogo
+  também recebiam a pilha minúscula padrão do jogo. Toda thread nova do jogo agora recebe pelo menos 1 MB.
+
 ### v1.0.1
 
 - **O SteamVR não fecha mais o jogo ao iniciar** (Valve Index e outros headsets do SteamVR): o jogo dá a cada thread uma

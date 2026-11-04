@@ -75,6 +75,8 @@ static struct {
     float crossAlpha;    // its opacity 0.1 .. 1 (CrosshairOpacity)
     float crossSize;     // ... its size, degrees
     float objWatchWidth; // the objectives on the back of the off hand: width in metres
+    float scopeWidth;    // [Scope] Width / Distance: the binoculars' view (the game's overlay) at the eye, metres
+    float scopeDistance;
     float objBackground; // ... the opacity of the dark panel behind them
     int   grenadeHold;   // 1 = grenades are held while their button is (the pin pulled) and thrown on release
     int   hipAccuracy;   // 1 = shots without aiming down the sights are as accurate as aimed ones
@@ -283,6 +285,8 @@ static void LoadConfig(void)
     cfg.hud.distance   = GetFloat("HUD", "Distance", cfg.hud.distance);
     cfg.hud.offsetY    = GetFloat("HUD", "OffsetY", cfg.hud.offsetY);
     cfg.hud.width      = GetFloat("HUD", "Width", cfg.hud.width);
+    cfg.scopeWidth     = GetFloat("Scope", "Width", 1.4f);
+    cfg.scopeDistance  = GetFloat("Scope", "Distance", 0.7f);
     cfg.hud.menuWidth  = GetFloat("HUD", "MenuWidth", cfg.hud.menuWidth);
     cfg.traceCmds   = GetInt("Debug", "TraceCommands", 0);
     cfg.fakeHmd     = GetInt("Debug", "FakeHeadset", 0);
@@ -1567,6 +1571,23 @@ static __declspec(naked) void hk_SetupProjection(void)
 static int EntityCenter(int ent, float c[3]);
 static void WorldToTracking(const float w[3], float body, float out[3]);
 
+// The binoculars are up (+binoculars: the chest holster, or a button). As in the Call of Duty 1 VR mod's United Offensive
+// binoculars: aimed with the head (held to the eyes the controller points anywhere, and the missions' artillery spotting,
+// maps/_artillery.gsc, aims along the player's view: getplayerangles), and their view (the game's overlay on the HUD) is at
+// the eyes, filling the sight, once the game has zoomed in.
+static int BinocularsUp(void)
+{
+    static int was;
+    int up = g_mode == MODE_VR && InLevel() && (MEM(int, ADDR_cg_ps + PS_OFS_pmFlags) & PMF_BINOCULARS) != 0;
+    if (up != was) { was = up; Log("binoculars: %s", up ? "up (aimed with the head, their view at the eyes)" : "down"); }
+    return up;
+}
+
+static int BinocularsZoomed(void)
+{
+    return BinocularsUp() && MEM(float, ADDR_cg_ps + PS_OFS_adsFrac) > 0.9f;
+}
+
 // The centre of the entity the free hand uses, in tracking space (0 = it is gone or no longer usable).
 static int UseTargetAt(int ent, float out[3])
 {
@@ -1596,6 +1617,10 @@ static void UpdateViewAngles(void)
         float hy = RAD(YawOf(g_head.axis[0]));
         dir[0] = cosf(hy) * 0.6428f; dir[1] = sinf(hy) * 0.6428f; dir[2] = 0.766f;
         hand = g_aimHand;
+    } else if (BinocularsUp()) {
+        // the binoculars: where the head looks (the spotting scripts aim along the view)
+        for (i = 0; i < 3; i++) dir[i] = g_head.axis[0][i];
+        hand = g_aimHand;   // not a change of the aim's source
     } else if (use && UseTargetAt(use, useAt)) {
         // the free hand's trigger is using something: the aim goes to its centre from the soldier's eye, so the
         // game uses it
@@ -2149,7 +2174,7 @@ static void UpdateCrosshair(void)
     vr_pose_t gun;
     float c[3], right[3], o[3], dist = cfg.converge, seen[3];
     int i;
-    if (!cfg.crosshair || !g_lastWorld || MenuActive() || !GunPose(&gun)) return;
+    if (!cfg.crosshair || !g_lastWorld || MenuActive() || !GunPose(&gun) || BinocularsUp()) return;
     for (i = 0; i < 3; i++) col[i] = cfg.crossColor[i] * cfg.crossAlpha;
     col[3] = cfg.crossAlpha;
     memcpy(o, gun.pos, 12);
@@ -3137,6 +3162,12 @@ static void BeforePresentWork(void)
     if (MenuActive()) {
         hud.width = cfg.hud.menuWidth;
         if (!cfg.menuFollowsHead && g_menuPlaced) { hud.posed = 1; hud.pose = g_menuPose; }
+    } else if (BinocularsZoomed()) {
+        // the binoculars' view (the game's overlay over the HUD) at the eyes, head-locked, filling the sight
+        hud.posed = 0;
+        hud.width = cfg.scopeWidth;
+        hud.distance = cfg.scopeDistance;
+        hud.offsetY = 0;
     } else if (objPosed) {
         hud.pose = objPose;
         hud.posed = 1;   // the objectives on the back of the off hand, like a watch

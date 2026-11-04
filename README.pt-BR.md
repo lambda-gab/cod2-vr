@@ -156,6 +156,13 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.5
+
+- **Corrigido o fechamento ao iniciar na versão Steam:** a DLL do overlay da Steam (carregada em todo jogo que a Steam
+  abre, mesmo com o overlay desligado) chamava o Present do jogo de dentro dele mesmo, sem parar. O ciclo agora é cortado.
+- **Binóculo como no mod do United Offensive:** levantado, ele mira com a sua cabeça (a artilharia vai para onde você
+  olha), e a vista dele fica colada nos seus olhos, ocupando a visão.
+
 ### v1.0.4
 
 - **Fechamento ao iniciar em alguns PCs:** um Present chamado de novo dentro de outro (um programa encaixado nele,

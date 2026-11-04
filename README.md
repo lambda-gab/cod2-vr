@@ -153,6 +153,13 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.5
+
+- **The crash at start with the Steam version is fixed:** Steam's overlay DLL (loaded into every game Steam starts, even
+  with the overlay turned off) called the game's present again from inside it, endlessly. The loop is now cut.
+- **Binoculars as in the United Offensive VR mod:** while they are up they are aimed with your head (artillery spotting
+  works where you look), and their view sits at your eyes, filling your sight.
+
 ### v1.0.4
 
 - **Crash at start on some PCs:** a present called again from inside a present (another program hooked into it,

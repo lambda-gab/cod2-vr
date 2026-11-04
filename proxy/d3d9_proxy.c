@@ -153,7 +153,12 @@ static void ScPresentWork(void)
 
 // A present that comes back into these hooks while one is running (another program hooked into the present calling the
 // device's present again) is passed straight to the original, without the mod's work: logged once, with the caller.
+// One level only: the Steam overlay (gameoverlayrenderer.dll+7a464, a player's v1.0.4 log) calls the swap chain's Present
+// from inside the present, and passing it on came back to the overlay again, without end (the stack overflowed). A
+// present nested twice is answered D3D_OK without calling anything: the headset's images do not go through the window's
+// present, only the monitor's copy can miss a frame.
 static int g_presentDepth;
+static LONG g_presentCut;
 
 static void NestedPresent(const char *which, void *caller)
 {
@@ -163,14 +168,21 @@ static void NestedPresent(const char *which, void *caller)
     if (logged++) return;
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)caller, &m) && m)
         GetModuleFileNameA(m, mod, sizeof(mod));
-    Log("present: %s called again inside a present, from %s+%lx (passed straight on)", which,
+    Log("present: %s called again inside a present, from %s+%lx (passed on once; deeper calls answered at once)", which,
         strrchr(mod, '\\') ? strrchr(mod, '\\') + 1 : mod, m ? (unsigned long)((BYTE *)caller - (BYTE *)m) : 0ul);
 }
 
 static HRESULT STDMETHODCALLTYPE hk_DevPresent(IDirect3DDevice9 *d, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r)
 {
     HRESULT hr;
-    if (g_presentDepth) { NestedPresent("the device's Present", _ReturnAddress()); return o_DevPresent(d, s, dst, w, r); }
+    if (g_presentDepth >= 2) { if (InterlockedIncrement(&g_presentCut) == 1) Log("present: a present loop cut (the device's Present)"); return D3D_OK; }
+    if (g_presentDepth) {
+        NestedPresent("the device's Present", _ReturnAddress());
+        g_presentDepth++;
+        hr = o_DevPresent(d, s, dst, w, r);
+        g_presentDepth--;
+        return hr;
+    }
     g_presentDepth++;
     g_pr.d = d; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r;
     VR_RunOnBigStack(DevPresentWork);
@@ -182,7 +194,14 @@ static HRESULT STDMETHODCALLTYPE hk_DevPresent(IDirect3DDevice9 *d, const RECT *
 static HRESULT STDMETHODCALLTYPE hk_ScPresent(IDirect3DSwapChain9 *sc, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r, DWORD f)
 {
     HRESULT hr;
-    if (g_presentDepth) { NestedPresent("the swap chain's Present", _ReturnAddress()); return o_ScPresent(sc, s, dst, w, r, f); }
+    if (g_presentDepth >= 2) { if (InterlockedIncrement(&g_presentCut) == 1) Log("present: a present loop cut (the swap chain's Present)"); return D3D_OK; }
+    if (g_presentDepth) {
+        NestedPresent("the swap chain's Present", _ReturnAddress());
+        g_presentDepth++;
+        hr = o_ScPresent(sc, s, dst, w, r, f);
+        g_presentDepth--;
+        return hr;
+    }
     g_presentDepth++;
     g_pr.sc = sc; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r; g_pr.f = f;
     VR_RunOnBigStack(ScPresentWork);

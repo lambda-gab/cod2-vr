@@ -215,6 +215,8 @@
 #define PS_OFS_damageEvent         0xf8
 #define PS_OFS_damageCount         0x104
 #define PS_OFS_pmFlags             0x0c
+#define PMF_BINOCULARS             0x20000      // pm_flags: the binoculars are up (+binoculars; BG_GetViewmodelWeaponIndex)
+#define PS_OFS_adsFrac             0xb8         // float: how far the weapon is in aim down the sights, 0 .. 1 (what playerads() returns)
 #define PS_OFS_offhandWeapon       0xac
 #define PS_OFS_weapon              0xb0
 #define ADDR_BG_GetViewmodelWeaponIndex 0x004dc6a0

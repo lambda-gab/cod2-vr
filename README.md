@@ -153,6 +153,13 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.4
+
+- **Crash at start on some PCs:** a present called again from inside a present (another program hooked into it,
+  such as an overlay) now goes straight to the game instead of looping until the game closes.
+- **Better crash report:** if the game still closes with a stack overflow, the log lists the programs' modules found
+  on the stack, which names the one causing the loop.
+
 ### v1.0.3
 
 - **Crash at start on some PCs (Steam version, overlays):** the whole frame presentation, with the Steam overlay and

@@ -156,6 +156,13 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.4
+
+- **Fechamento ao iniciar em alguns PCs:** um Present chamado de novo dentro de outro (um programa encaixado nele,
+  como um overlay) agora vai direto ao jogo em vez de entrar num ciclo até o jogo fechar.
+- **Relatório de crash melhor:** se o jogo ainda fechar por estouro de pilha, o log lista os módulos encontrados na
+  pilha, o que aponta o programa que causa o ciclo.
+
 ### v1.0.3
 
 - **Fechamento ao iniciar em alguns PCs (versão Steam, overlays):** toda a apresentação do quadro, com o overlay da

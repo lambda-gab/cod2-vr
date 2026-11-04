@@ -16,6 +16,7 @@
 //  * Without a headset the two eyes are shown side by side on the monitor (stereo test).
 #define _CRT_SECURE_NO_WARNINGS
 #include "cod2_vr.h"
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -1836,6 +1837,66 @@ static HANDLE WINAPI hk_CreateRemoteThreadEx(HANDLE proc, LPSECURITY_ATTRIBUTES 
 static char  g_crashLine[512];
 static LONG  g_crashCount;
 
+// The process's modules, listed beforehand (VR_ListModules: at the start of VR and of the first frame), so the crash
+// logger can name the code on an overflowed stack without calling Windows (there is almost no stack left then).
+#define MAX_MODS 160
+static struct { DWORD base, size; char name[40]; int hits; } g_mods[MAX_MODS];
+static int g_numMods;
+
+void VR_ListModules(void)
+{
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    MODULEENTRY32 me;
+    int n = 0;
+    if (s == INVALID_HANDLE_VALUE) return;
+    me.dwSize = sizeof(me);
+    if (Module32First(s, &me)) do {
+        if (n == MAX_MODS) break;
+        g_mods[n].base = (DWORD)me.modBaseAddr;
+        g_mods[n].size = me.modBaseSize;
+        strncpy(g_mods[n].name, me.szModule, sizeof(g_mods[n].name) - 1);
+        g_mods[n].name[sizeof(g_mods[n].name) - 1] = 0;
+        n++;
+    } while (Module32Next(s, &me));
+    CloseHandle(s);
+    g_numMods = n;
+}
+
+// A stack overflow: which modules' code the overflowed stack is made of (values that point into a module, from the
+// top down to 256 KB), and the first return addresses. A loop shows as the same few modules again and again.
+static void LogStackModules(DWORD esp, DWORD base)
+{
+    DWORD a, end = esp + 256 * 1024;
+    int i, k, shown = 0;
+    char *w;
+    if (end > base) end = base;
+    for (i = 0; i < g_numMods; i++) g_mods[i].hits = 0;
+    w = g_crashLine;
+    w += _snprintf(w, 200, "stack top:");
+    for (a = esp; a + 4 <= end; a += 4) {
+        DWORD v = *(DWORD *)a;
+        for (i = 0; i < g_numMods; i++)
+            if (v - g_mods[i].base < g_mods[i].size) {
+                g_mods[i].hits++;
+                if (shown < 14 && w < g_crashLine + 400) { w += _snprintf(w, 60, " %s+%lx", g_mods[i].name, v - g_mods[i].base); shown++; }
+                break;
+            }
+    }
+    *w = 0;
+    Log("%s", g_crashLine);
+    w = g_crashLine;
+    w += _snprintf(w, 200, "stack modules (pointers in 256 KB):");
+    for (k = 0; k < 10; k++) {
+        int best = -1;
+        for (i = 0; i < g_numMods; i++) if (g_mods[i].hits > 0 && (best < 0 || g_mods[i].hits > g_mods[best].hits)) best = i;
+        if (best < 0 || w > g_crashLine + 440) break;
+        w += _snprintf(w, 60, " %s %d", g_mods[best].name, g_mods[best].hits);
+        g_mods[best].hits = 0;
+    }
+    *w = 0;
+    Log("%s", g_crashLine);
+}
+
 static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS *ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -1859,6 +1920,7 @@ static LONG CALLBACK CrashLogger(EXCEPTION_POINTERS *ep)
               ep->ContextRecord->Esp, code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2 ? "" : "");
     g_crashLine[sizeof(g_crashLine) - 1] = 0;
     Log("%s", g_crashLine);
+    if (code == EXCEPTION_STACK_OVERFLOW && g_numMods) LogStackModules(ep->ContextRecord->Esp, (DWORD)tib->StackBase);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -1871,6 +1933,7 @@ static void InstallThreadStackHook(void)
     if (done) return;
     done = 1;
     AddVectoredExceptionHandler(1, CrashLogger);
+    VR_ListModules();
     p = kb ? (BYTE *)GetProcAddress(kb, "CreateRemoteThreadEx") : NULL;
     if (!p || p[0] != 0x68) { Log("threads: CreateRemoteThreadEx not as expected, thread stacks left as they are"); return; }
     tramp = (BYTE *)VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -3008,6 +3071,7 @@ static void RunOnBigStack(void (*work)(void))
         if (g_gameFiber) g_workFiber = CreateFiberEx(0, 4 << 20, FIBER_FLAG_FLOAT_SWITCH, WorkFiber, NULL);
         if (!g_workFiber) { g_fiberFailed = 1; Log("stack: no fiber for the frame work (%lu), on the game's stack", GetLastError()); }
         else Log("stack: the frame work runs on a 4 MB stack of its own (the game's threads have 64 KB)");
+        VR_ListModules();   // what is loaded by the first frame (an overlay injected by now)
     }
     if (!g_workFiber || GetCurrentFiber() != g_gameFiber) { work(); return; }   // another thread, or already on it
     g_fiberWork = work;

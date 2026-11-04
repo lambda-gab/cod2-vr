@@ -9,6 +9,7 @@
 //
 // Hooks are vtable patches on the system's objects (one device per process).
 #define _CRT_SECURE_NO_WARNINGS
+#include <intrin.h>
 #include "cod2_vr.h"
 #include "controls.h"
 #include <stdio.h>
@@ -150,18 +151,44 @@ static void ScPresentWork(void)
     VR_AfterPresent();
 }
 
+// A present that comes back into these hooks while one is running (another program hooked into the present calling the
+// device's present again) is passed straight to the original, without the mod's work: logged once, with the caller.
+static int g_presentDepth;
+
+static void NestedPresent(const char *which, void *caller)
+{
+    static int logged;
+    HMODULE m = NULL;
+    char mod[MAX_PATH] = "?";
+    if (logged++) return;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)caller, &m) && m)
+        GetModuleFileNameA(m, mod, sizeof(mod));
+    Log("present: %s called again inside a present, from %s+%lx (passed straight on)", which,
+        strrchr(mod, '\\') ? strrchr(mod, '\\') + 1 : mod, m ? (unsigned long)((BYTE *)caller - (BYTE *)m) : 0ul);
+}
+
 static HRESULT STDMETHODCALLTYPE hk_DevPresent(IDirect3DDevice9 *d, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r)
 {
+    HRESULT hr;
+    if (g_presentDepth) { NestedPresent("the device's Present", _ReturnAddress()); return o_DevPresent(d, s, dst, w, r); }
+    g_presentDepth++;
     g_pr.d = d; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r;
     VR_RunOnBigStack(DevPresentWork);
-    return g_pr.hr;
+    hr = g_pr.hr;
+    g_presentDepth--;
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE hk_ScPresent(IDirect3DSwapChain9 *sc, const RECT *s, const RECT *dst, HWND w, const RGNDATA *r, DWORD f)
 {
+    HRESULT hr;
+    if (g_presentDepth) { NestedPresent("the swap chain's Present", _ReturnAddress()); return o_ScPresent(sc, s, dst, w, r, f); }
+    g_presentDepth++;
     g_pr.sc = sc; g_pr.s = s; g_pr.dst = dst; g_pr.w = w; g_pr.r = r; g_pr.f = f;
     VR_RunOnBigStack(ScPresentWork);
-    return g_pr.hr;
+    hr = g_pr.hr;
+    g_presentDepth--;
+    return hr;
 }
 
 // The gun drawn mirrored (a left-handed player's: Proxy_SetMirrorGun). A mirrored model's triangles wind the other way, so

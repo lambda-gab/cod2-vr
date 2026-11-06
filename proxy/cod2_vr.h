@@ -21,8 +21,9 @@ void VR_DeviceCreated(IDirect3DDevice9Ex *dev, const D3DPRESENT_PARAMETERS *pp);
 void VR_DeviceReset(const D3DPRESENT_PARAMETERS *pp);   // after a successful Reset
 void VR_BeforePresent(void);    // the frame is complete in the back buffer's place
 void VR_AfterPresent(void);
-void VR_RunOnBigStack(void (*work)(void));
-void VR_ListModules(void);   // the loaded modules, for the crash log   // work on the mod's 4 MB stack (the game's threads have 64 KB)
+void VR_RunOnBigStack(void (*work)(void));   // work on the mod's 4 MB stack (the game's threads have 64 KB)
+void VR_ListModules(void);   // the loaded modules, for the crash log
+int  VR_ScopedWeapon(void);   // the weapon in the hand zooms with an overlay (a scoped rifle; not the binoculars)
 void VR_OnCreateCmd(void);       // controls.c: a usercmd is being made (CL_FinishMove)
 void VR_Command(const char *cmd);   // controls.c: a "vr:" button command was pressed (recenter, vignette)
 void Proxy_SetMirrorGun(int on);   // d3d9_proxy.c: the view weapon is drawn mirrored this frame (its cull mode flipped)
@@ -56,6 +57,7 @@ typedef struct {
     float  panel;        // a dark rounded panel under the HUD screen's content (the objectives on the hand), opacity
     int    backdrop;     // opaque black behind the screens (no world: the death screen), instead of the empty space
     int    hideHud;      // no HUD screen this frame (all its 2D went to the full-view layer: the death screen)
+    int    opaque;       // the HUD screen drawn without its alpha (the zoomed scope view fills it)
 } vr_hud_t;
 
 // image effects on the eye images ([PostFX]; postfx.c)

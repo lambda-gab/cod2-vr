@@ -1062,7 +1062,7 @@ void XR_EndFrame(const vr_hud_t *hud)
     // colours are already multiplied by alpha.
     if (render && !hud->hideHud && CopyToSwapchain(SC_HUD, hud->panel, 0)) {
         float width = hud->width;
-        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        quad.layerFlags = hud->opaque ? 0 : XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         quad.space = hud->headLocked ? xr.view : xr.local;
         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage.swapchain = xr.swapchain[SC_HUD];

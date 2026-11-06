@@ -153,6 +153,15 @@ The log is `cod2_vr.log` (under `Program Files` it lands in `%LOCALAPPDATA%\Virt
 
 ## Releases
 
+### v1.0.6
+
+- **Scoped rifles and binoculars zoom for real:** while the game zooms in, its zoomed view is drawn behind the scope or
+  binocular overlay, at your eyes, filling your sight (as the original scope of the Call of Duty 1 VR mod). With a scoped
+  rifle, hold the free hand's trigger to zoom. Settings in `cod2_vr.ini` `[Scope]`: `Enabled`, `MaxFov`, `Width`,
+  `Distance`, `Zoom` (extra magnification).
+- **The DVD version is supported:** its `CoD2SP_s.exe` 1.3 has a rewritten header, so the mod and the setup did not
+  recognise it. They now check the game's code itself.
+
 ### v1.0.5
 
 - **The crash at start with the Steam version is fixed:** Steam's overlay DLL (loaded into every game Steam starts, even

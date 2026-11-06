@@ -156,6 +156,15 @@ O log é o `cod2_vr.log` (em `Arquivos de Programas` ele vai para `%LOCALAPPDATA
 
 ## Releases
 
+### v1.0.6
+
+- **Zoom de verdade nos rifles com luneta e no binóculo:** quando o jogo dá zoom, a vista ampliada aparece atrás da
+  luneta ou do binóculo, colada nos seus olhos, ocupando a visão (como a mira original do mod VR do Call of Duty 1). Com
+  um rifle de luneta, segure o gatilho da mão livre para dar zoom. Configurações no `cod2_vr.ini` `[Scope]`: `Enabled`,
+  `MaxFov`, `Width`, `Distance`, `Zoom` (ampliação extra).
+- **A versão em DVD é suportada:** o `CoD2SP_s.exe` 1.3 dela tem o cabeçalho reescrito, e o mod e o instalador não o
+  reconheciam. Agora eles conferem o próprio código do jogo.
+
 ### v1.0.5
 
 - **Corrigido o fechamento ao iniciar na versão Steam:** a DLL do overlay da Steam (carregada em todo jogo que a Steam

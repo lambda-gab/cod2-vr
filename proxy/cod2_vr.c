@@ -23,6 +23,7 @@
 #include <intrin.h>
 
 #include "cod2_addresses.h"
+#include "cod2_signature.h"
 #include "controls.h"
 #include "arms.h"
 
@@ -77,6 +78,9 @@ static struct {
     float objWatchWidth; // the objectives on the back of the off hand: width in metres
     float scopeWidth;    // [Scope] Width / Distance: the binoculars' view (the game's overlay) at the eye, metres
     float scopeDistance;
+    int   scopeView;     // [Scope] Enabled: 1 = while the game zooms in (a scope, the binoculars) its zoomed view is drawn
+    float scopeZoom;     // [Scope] Zoom: the zoomed view magnified this much more than the game's own (the overlay keeps its size)
+    float scopeMaxFov;   // [Scope] MaxFov: ... when the game's fov is below this (iron sights zoom to about 50)
     float objBackground; // ... the opacity of the dark panel behind them
     int   grenadeHold;   // 1 = grenades are held while their button is (the pin pulled) and thrown on release
     int   hipAccuracy;   // 1 = shots without aiming down the sights are as accurate as aimed ones
@@ -285,8 +289,13 @@ static void LoadConfig(void)
     cfg.hud.distance   = GetFloat("HUD", "Distance", cfg.hud.distance);
     cfg.hud.offsetY    = GetFloat("HUD", "OffsetY", cfg.hud.offsetY);
     cfg.hud.width      = GetFloat("HUD", "Width", cfg.hud.width);
-    cfg.scopeWidth     = GetFloat("Scope", "Width", 1.4f);
+    cfg.scopeWidth     = GetFloat("Scope", "Width", 2.0f);
     cfg.scopeDistance  = GetFloat("Scope", "Distance", 0.7f);
+    cfg.scopeView      = GetInt("Scope", "Enabled", 1);
+    cfg.scopeMaxFov    = GetFloat("Scope", "MaxFov", 35.0f);
+    cfg.scopeZoom      = GetFloat("Scope", "Zoom", 1.0f);
+    if (cfg.scopeZoom < 0.5f) cfg.scopeZoom = 0.5f;
+    if (cfg.scopeZoom > 4.0f) cfg.scopeZoom = 4.0f;
     cfg.hud.menuWidth  = GetFloat("HUD", "MenuWidth", cfg.hud.menuWidth);
     cfg.traceCmds   = GetInt("Debug", "TraceCommands", 0);
     cfg.fakeHmd     = GetInt("Debug", "FakeHeadset", 0);
@@ -438,6 +447,20 @@ static DWORD PeTimestamp(DWORD base)
     return ((IMAGE_NT_HEADERS *)(base + dos->e_lfanew))->FileHeader.TimeDateStamp;
 }
 
+// An exe with another PE timestamp (the DVD copy's "DEV\0") whose code at the mod's places is 1.3's (cod2_signature.h).
+// Called before any patch. A packed exe (the Steam one, which has the right timestamp anyway) would not match here.
+static int CodeIs13(void)
+{
+    int i;
+    __try {
+        for (i = 0; i < (int)(sizeof(g_cod2Sig) / sizeof(g_cod2Sig[0])); i++)
+            if (memcmp((const void *)(DWORD_PTR)g_cod2Sig[i].va, g_cod2Sig[i].bytes, COD2SIG_LEN)) return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return 1;
+}
+
 // Com_Init queues "unskippablecinematic legal" and, unless com_introPlayed is set, the logo
 // videos. The first is blanked out (same length) and the check of the second always passes.
 static void SkipIntro(void)
@@ -468,10 +491,13 @@ void VR_ProcessAttach(HMODULE self)
     if ((p = strrchr(g_dir, '\\')) != NULL) *p = 0;
     LoadConfig();
     if (PeTimestamp((DWORD)GetModuleHandleA(NULL)) != COD2SP_TIMESTAMP) {
-        Log("not CoD2SP_s.exe 1.3 (timestamp %08x): passthrough only", PeTimestamp((DWORD)GetModuleHandleA(NULL)));
-        cfg.enabled = 0;
-        g_useEx = 0;
-        return;
+        if (!CodeIs13()) {
+            Log("not CoD2SP_s.exe 1.3 (timestamp %08x, code differs): passthrough only", PeTimestamp((DWORD)GetModuleHandleA(NULL)));
+            cfg.enabled = 0;
+            g_useEx = 0;
+            return;
+        }
+        Log("CoD2SP_s.exe timestamp %08x, but the code is 1.3's: the mod runs", PeTimestamp((DWORD)GetModuleHandleA(NULL)));
     }
     if (cfg.enabled && cfg.skipIntro) SkipIntro();
 }
@@ -727,6 +753,13 @@ static void BE_SetTarget(int t)
 static BYTE         *g_vp;              // the world view's viewParms (frontend data, 0x14c bytes)
 static cod2_refdef_t g_eyeRef[2];       // what each eye's view is made from
 static int           g_stereoReady;     // this frame's world view has eyes to render
+// The scope view (as the Call of Duty 1 VR mod's RenderScopeView, the original scope): while the game zooms in (a scoped
+// rifle aimed, the binoculars) the world's commands are run a third time, after the two eyes, with the game's own view
+// (from the soldier's eye along the aim, its zoomed fov) into the HUD texture, under the 2D drawn next (the scope or
+// binocular overlay). The HUD screen then shows the flat game's scope, head-locked at the eyes, opaque.
+static cod2_refdef_t g_scopeRef;        // the game's own zoomed view of this frame
+static int           g_scopeWanted;     // ... to be drawn this frame
+static int           g_scopeDrawn;      // the backend drew it this frame (for the HUD screen's placement)
 static int           g_bePass;          // 0, 1 (left eye), 2 (right eye)
 static BYTE         *g_replayStart;
 
@@ -793,10 +826,29 @@ static void __cdecl hk_CmdViewport(BYTE **ctx)
                 ((int *)ctx)[1] = 0;
             } else if (g_bePass == 2) {
                 if (g_eyeMS[1]) IDirect3DDevice9Ex_StretchRect(g_dev, g_eyeMS[1], NULL, g_eyeSurf[1], NULL, D3DTEXF_NONE);
+                if (g_mode == MODE_VR && g_scopeWanted && g_hudSurf) {
+                    // the scope view: once more, the game's own zoomed view, into the HUD texture (cleared)
+                    float *globals = (float *)GFX(GFX_r_viewOrgFwd);
+                    g_bePass = 3;
+                    BE_SetTarget(TGT_HUD);
+                    g_projEye = -1;
+                    SetupViewParms(g_vp, &g_scopeRef);
+                    memcpy(globals, g_scopeRef.vieworg, 3 * sizeof(float));
+                    memcpy(globals + 3, g_scopeRef.viewaxis[0], 3 * sizeof(float));
+                    ctx[0] = g_replayStart;
+                    ((int *)ctx)[1] = 0;
+                    return;
+                }
                 g_bePass = 0;
                 g_stereoReady = 0;
                 if (g_mode == MODE_VR) BE_SetTarget(TGT_HUD);
                 else SideBySideComposite();
+            } else if (g_bePass == 3) {
+                // the 2D (the scope's overlay) goes over it: the HUD texture bound again, not cleared
+                g_bePass = 0;
+                g_stereoReady = 0;
+                g_scopeDrawn = 1;
+                BE_SetTarget(TGT_HUDK);
             }
         } else {
             BE_SetTarget(m);
@@ -1472,6 +1524,17 @@ static void RenderStereo(cod2_refdef_t *fd)
     int k, i;
 
     if (g_mode == MODE_VR) UpdateHeadPush(saved.vieworg, saved.viewaxis);
+    g_scopeWanted = g_mode == MODE_VR && cfg.scopeView && saved.fov_x > 1.0f && saved.fov_x < cfg.scopeMaxFov;
+    if (g_scopeWanted) {
+        static int logged;
+        g_scopeRef = saved;
+        if (cfg.scopeZoom != 1.0f) {
+            // more magnification: the same picture over a narrower fov
+            g_scopeRef.fov_x = 2.0f * DEG(atanf(tanf(RAD(saved.fov_x * 0.5f)) / cfg.scopeZoom));
+            g_scopeRef.fov_y = 2.0f * DEG(atanf(tanf(RAD(saved.fov_y * 0.5f)) / cfg.scopeZoom));
+        }
+        if (logged < 3) { logged++; Log("scope: the game zooms in (fov %.1f): its view drawn on the HUD screen at the eyes", saved.fov_x); }
+    }
     for (k = 0; k < 2; k++) {
         cod2_refdef_t *r = &g_eyeRef[k];
         *r = saved;
@@ -1581,6 +1644,24 @@ static int BinocularsUp(void)
     int up = g_mode == MODE_VR && InLevel() && (MEM(int, ADDR_cg_ps + PS_OFS_pmFlags) & PMF_BINOCULARS) != 0;
     if (up != was) { was = up; Log("binoculars: %s", up ? "up (aimed with the head, their view at the eyes)" : "down"); }
     return up;
+}
+
+// The weapon in the hand zooms with an overlay (a scoped rifle), not the binoculars.
+int VR_ScopedWeapon(void)
+{
+    const BYTE *d;
+    const char *ov;
+    int w;
+    if (g_mode != MODE_VR || !InLevel() || BinocularsUp()) return 0;
+    __try {
+        w = ViewWeaponIndex();
+        if (w <= 0 || w > MEM(int, ADDR_bg_numWeapons)) return 0;
+        d = MEM(const BYTE *, ADDR_bg_weaponDefs + w * 4);
+        ov = d ? MEM(const char *, d + WEAPDEF_OFS_adsOverlayShader) : NULL;
+        return (DWORD)ov > 0x10000 && ov[0];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
 static int BinocularsZoomed(void)
@@ -1788,6 +1869,7 @@ static void __cdecl hk_BeginFrame(void)
     g_fullPainted = 0;
     g_beFullFilled = 0;   // the backend of this frame runs in re.EndFrame, after this
     g_worldThisFrame = 0;
+    g_scopeDrawn = 0;
     g_pitchSampled = 0;
     g_frameNo++;
     if (!cfg.enabled) { g_mode = MODE_OFF; return; }
@@ -2174,7 +2256,7 @@ static void UpdateCrosshair(void)
     vr_pose_t gun;
     float c[3], right[3], o[3], dist = cfg.converge, seen[3];
     int i;
-    if (!cfg.crosshair || !g_lastWorld || MenuActive() || !GunPose(&gun) || BinocularsUp()) return;
+    if (!cfg.crosshair || !g_lastWorld || MenuActive() || !GunPose(&gun) || BinocularsUp() || g_scopeDrawn) return;
     for (i = 0; i < 3; i++) col[i] = cfg.crossColor[i] * cfg.crossAlpha;
     col[3] = cfg.crossAlpha;
     memcpy(o, gun.pos, 12);
@@ -3162,12 +3244,14 @@ static void BeforePresentWork(void)
     if (MenuActive()) {
         hud.width = cfg.hud.menuWidth;
         if (!cfg.menuFollowsHead && g_menuPlaced) { hud.posed = 1; hud.pose = g_menuPose; }
-    } else if (BinocularsZoomed()) {
+    } else if (g_scopeDrawn || BinocularsZoomed()) {
         // the binoculars' view (the game's overlay over the HUD) at the eyes, head-locked, filling the sight
         hud.posed = 0;
         hud.width = cfg.scopeWidth;
         hud.distance = cfg.scopeDistance;
         hud.offsetY = 0;
+        hud.headLocked = 1;
+        hud.opaque = g_scopeDrawn;   // the zoomed world fills it
     } else if (objPosed) {
         hud.pose = objPose;
         hud.posed = 1;   // the objectives on the back of the off hand, like a watch

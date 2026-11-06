@@ -947,7 +947,14 @@ void Controls_Frame(float dt, const vr_pose_t *menuScreen, float w, float h)
             Cbuf("-activate\n");
         }
         g_useTrigWas = down;
-        SetButton(BT_STRIGGER, !g_useEnt && Pressed(g_in.trigger[off], BT_STRIGGER));
+        {
+            // a scoped rifle: the free hand's trigger held zooms (aim down the sights, +speed), as the CoD 1 mod's
+            static int zoomOn;
+            int scoped = VR_ScopedWeapon(), want = 0;
+            if (scoped && !g_useEnt) want = g_in.trigger[off] > (zoomOn ? 0.35f : 0.65f);
+            if (want != zoomOn) { zoomOn = want; Cbuf(want ? "+speed\n" : "-speed\n"); }
+            SetButton(BT_STRIGGER, !scoped && !g_useEnt && Pressed(g_in.trigger[off], BT_STRIGGER));
+        }
     }
     SetButton(BT_SGRIP, !g_twoHand && !zo && g_gripUseHand != off && Pressed(g_in.grip[off], BT_SGRIP));   // on the handguard it holds the gun
     {

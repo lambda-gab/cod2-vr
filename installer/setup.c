@@ -14,6 +14,7 @@
 #include <string.h>
 #include <wchar.h>
 #include "setup_res.h"
+#include "../proxy/cod2_signature.h"
 
 #define COD2SP_TIMESTAMP  0x442ca3f7              // CoD2SP_s.exe 1.3
 #define GAME_EXE          L"CoD2SP_s.exe"
@@ -75,6 +76,45 @@ static DWORD ExeTimestamp(const wchar_t *dir)
     pe = *(DWORD *)(buf + 0x3c);
     if (pe + 12 > n || memcmp(buf + pe, "PE\0\0", 4)) return 0;
     return *(DWORD *)(buf + pe + 8);
+}
+
+// The game exe is 1.3: its timestamp, or (another timestamp, as the DVD copy's "DEV\0") its code at the mod's places
+// (cod2_signature.h), read from the file through its section table.
+static int ExeSupported(const wchar_t *dir)
+{
+    wchar_t p[MAX_PATH];
+    HANDLE f, m;
+    const BYTE *d;
+    DWORD size;
+    int ok = 0, i, j;
+    if (ExeTimestamp(dir) == COD2SP_TIMESTAMP) return 1;
+    Join(p, dir, GAME_EXE);
+    f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    size = GetFileSize(f, NULL);
+    m = CreateFileMappingW(f, NULL, PAGE_READONLY, 0, 0, NULL);
+    d = m ? (const BYTE *)MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0) : NULL;
+    if (d && size > 0x400) {
+        const IMAGE_NT_HEADERS32 *nt = (const IMAGE_NT_HEADERS32 *)(d + *(const DWORD *)(d + 0x3c));
+        if (*(const DWORD *)(d + 0x3c) + sizeof(*nt) < size && nt->Signature == IMAGE_NT_SIGNATURE) {
+            const IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+            DWORD base = nt->OptionalHeader.ImageBase;
+            ok = 1;
+            for (i = 0; ok && i < (int)(sizeof(g_cod2Sig) / sizeof(g_cod2Sig[0])); i++) {
+                DWORD rva = g_cod2Sig[i].va - base, raw = 0;
+                for (j = 0; j < nt->FileHeader.NumberOfSections; j++)
+                    if (rva >= sec[j].VirtualAddress && rva + COD2SIG_LEN <= sec[j].VirtualAddress + sec[j].SizeOfRawData) {
+                        raw = sec[j].PointerToRawData + rva - sec[j].VirtualAddress;
+                        break;
+                    }
+                ok = raw && raw + COD2SIG_LEN <= size && !memcmp(d + raw, g_cod2Sig[i].bytes, COD2SIG_LEN);
+            }
+        }
+    }
+    if (d) UnmapViewOfFile(d);
+    if (m) CloseHandle(m);
+    CloseHandle(f);
+    return ok;
 }
 
 static int RegPath(HKEY root, const wchar_t *key, const wchar_t *value, wchar_t *out)
@@ -293,7 +333,7 @@ static int Silent(const wchar_t *cmd)
 // The setup window (as the Call of Duty 1 VR mod's v1.8.0 setup): one dark window in the launcher's colours (a welcome
 // page, the progress, the end), drawn by hand.
 // ---------------------------------------------------------------------------
-#define SETUP_VERSION L"v1.0.5"   // the launcher's VERSION_TEXT
+#define SETUP_VERSION L"v1.0.6"   // the launcher's VERSION_TEXT
 #define BASE_W 640
 #define BASE_H 420
 
@@ -333,7 +373,7 @@ static void Refresh(void)
     g_haveGame = HasGame(g_game);
     Join(dll, g_game, L"d3d9.dll");
     g_installed = g_haveGame && FileExists(dll) && IsOurDll(dll);
-    g_unsupported = g_haveGame && ExeTimestamp(g_game) != COD2SP_TIMESTAMP;   // the version the mod knows: CoD2SP_s.exe 1.3
+    g_unsupported = g_haveGame && !ExeSupported(g_game);   // the version the mod knows: CoD2SP_s.exe 1.3
 }
 
 static void FillR(HDC dc, int x0, int y0, int x1, int y1, COLORREF c)
